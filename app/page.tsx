@@ -1,4 +1,11 @@
+"use client";
+
+import Link from "next/link";
+import { useAuth } from "@/app/providers/AuthProvider";
+
 export default function Home() {
+  const { role } = useAuth();
+
   return (
     <main className="flex flex-col bg-white text-black">
       {/* Hero (mobile-first) */}
@@ -21,6 +28,18 @@ export default function Home() {
           </span>{" "}
           Stay tuned! Something amazing is coming soon 🚀
         </p>
+
+        {/* Admin-only CMS link */}
+        {role === "admin" && (
+          <div className="mt-10">
+            <Link
+              href="/cms"
+              className="rounded-full bg-gray-900 px-6 py-3 text-white text-sm font-medium hover:bg-gray-700 transition"
+            >
+              Go to CMS &rarr;
+            </Link>
+          </div>
+        )}
       </section>
     </main>
   );

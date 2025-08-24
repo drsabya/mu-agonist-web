@@ -2,10 +2,10 @@ import Link from "next/link";
 import { createClient } from "@/utils/supabase/server";
 
 export default async function Header() {
-  const supabase = createClient();
+  const supabase = await createClient();
   const {
     data: { user },
-  } = await (await supabase).auth.getUser();
+  } = await supabase.auth.getUser();
 
   return (
     <header className="w-full border-b border-gray-200 bg-white">
@@ -26,20 +26,18 @@ export default async function Header() {
           <Link href="/legal/about" className="hover:text-gray-900">
             About
           </Link>
-          <Link href="/legal/privacy" className="hover:text-gray-900">
-            Privacy
-          </Link>
-          <Link href="/legal/terms" className="hover:text-gray-900">
-            Terms
-          </Link>
 
-          {/* Auth button */}
-          {user ? (
-            <Link href="/auth/signout" className="text-red-600 hover:text-red-800">
-              Sign out
+          {user && (
+            <Link href="/profile" className="hover:text-gray-900">
+              Profile
             </Link>
-          ) : (
-            <Link href="/auth/login" className="text-emerald-600 hover:text-emerald-800">
+          )}
+
+          {!user && (
+            <Link
+              href="/auth/login"
+              className="text-emerald-600 hover:text-emerald-800"
+            >
               Sign in
             </Link>
           )}
