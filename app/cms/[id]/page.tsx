@@ -5,6 +5,7 @@ import AdminGuard from "@/app/components/auth/AdminGuard";
 import BaseEditor from "@/app/components/cms/lesson-items/BaseEditor";
 import ImageOverlayEditor from "@/app/components/cms/lesson-items/types/ImageOverlayEditor";
 import SliderMoverEditor from "@/app/components/cms/lesson-items/types/SliderMoverEditor";
+import SliderResizerEditor from "@/app/components/cms/lesson-items/types/SliderResizerEditor";
 import { revalidatePath } from "next/cache";
 
 // CMS content helpers (your exact schema/defaults)
@@ -13,8 +14,10 @@ import {
   getDefaultContent,
   imageOverlayContentSchema,
   sliderMoverContentSchema,
+  sliderResizerContentSchema,
   type ImageOverlayContent,
   type SliderMoverContent,
+  type SliderResizerContent,
 } from "@/utils/cms";
 
 export const dynamic = "force-dynamic"; // avoid caching while editing
@@ -38,12 +41,11 @@ type LessonItem = {
 };
 
 export default async function CMSItemPage({
-  // ⚠️ Next 15+: params is a Promise
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const { id } = await params; // ✅ await before use
+  const { id } = await params;
   const supabase = await createClient();
 
   // -------- Fetch metadata --------
@@ -76,8 +78,9 @@ export default async function CMSItemPage({
   // -------- Fetch content (per-type) --------
   let imageOverlayContent: ImageOverlayContent | null = null;
 
-  // Keep RAW for slider-mover editor (to coerce weird values like empty strings)
+  // RAW for coercion inside editors
   let sliderMoverInitialRaw: unknown = null;
+  let sliderResizerInitialRaw: unknown = null;
 
   if (item.type === "image-overlay") {
     const { data: contentRow } = await supabase
@@ -97,6 +100,14 @@ export default async function CMSItemPage({
       .maybeSingle();
 
     sliderMoverInitialRaw = contentRow?.content ?? null;
+  } else if (item.type === "slider-resizer") {
+    const { data: contentRow } = await supabase
+      .from("lesson_item_contents")
+      .select("content")
+      .eq("lesson_item_id", id)
+      .maybeSingle();
+
+    sliderResizerInitialRaw = contentRow?.content ?? null;
   }
 
   return (
@@ -112,7 +123,7 @@ export default async function CMSItemPage({
         {/* ---------- Metadata editor ---------- */}
         <BaseEditor item={item} onSaveAction={saveMetadataAction} />
 
-        {/* ---------- Type-specific editors (each has its own live preview internally) ---------- */}
+        {/* ---------- Type-specific editors ---------- */}
         {item.type === "image-overlay" && imageOverlayContent && (
           <section className="space-y-4">
             <h2 className="text-lg font-semibold">Image Overlay</h2>
@@ -127,11 +138,21 @@ export default async function CMSItemPage({
         {item.type === "slider-mover" && (
           <section className="space-y-4">
             <h2 className="text-lg font-semibold">Slider Mover</h2>
-            {/* Editor gets RAW; it will coerce/validate internally */}
             <SliderMoverEditor
               itemId={id}
               initialContent={sliderMoverInitialRaw as unknown as SliderMoverContent | null}
               onSave={saveSliderMoverContent}
+            />
+          </section>
+        )}
+
+        {item.type === "slider-resizer" && (
+          <section className="space-y-4">
+            <h2 className="text-lg font-semibold">Slider Resizer</h2>
+            <SliderResizerEditor
+              itemId={id}
+              initialContent={sliderResizerInitialRaw as unknown as SliderResizerContent | null}
+              onSave={saveSliderResizerContent}
             />
           </section>
         )}
@@ -147,7 +168,6 @@ async function saveMetadataAction(formData: FormData) {
 
   const id = String(formData.get("id"));
 
-  // helper: CSV -> string[]
   const csv = (v: FormDataEntryValue | null) =>
     String(v || "")
       .split(",")
@@ -172,7 +192,6 @@ async function saveMetadataAction(formData: FormData) {
   const { error } = await supabase.from("lesson_items").update(payload).eq("id", id);
   if (error) throw new Error(error.message);
 
-  // Revalidate this page so the header/fields reflect the latest values
   revalidatePath(`/cms/${id}`);
 }
 
@@ -184,19 +203,14 @@ async function saveImageOverlayContent(formData: FormData) {
   const id = String(formData.get("lesson_item_id"));
   const raw = String(formData.get("content") || "{}");
 
-  // Validate against your exact schema
   const parsed = imageOverlayContentSchema.parse(JSON.parse(raw));
 
   const { error } = await supabase
     .from("lesson_item_contents")
-    .upsert({
-      lesson_item_id: id,
-      content: parsed,
-    });
+    .upsert({ lesson_item_id: id, content: parsed });
 
   if (error) throw new Error(error.message);
 
-  // Ensure the page shows the latest content
   revalidatePath(`/cms/${id}`);
 }
 
@@ -208,15 +222,30 @@ async function saveSliderMoverContent(formData: FormData) {
   const id = String(formData.get("lesson_item_id"));
   const raw = String(formData.get("content") || "{}");
 
-  // Validate against your exact schema
   const parsed = sliderMoverContentSchema.parse(JSON.parse(raw));
 
   const { error } = await supabase
     .from("lesson_item_contents")
-    .upsert({
-      lesson_item_id: id,
-      content: parsed,
-    });
+    .upsert({ lesson_item_id: id, content: parsed });
+
+  if (error) throw new Error(error.message);
+
+  revalidatePath(`/cms/${id}`);
+}
+
+/* -------------------- Server Action: slider-resizer content -------------------- */
+async function saveSliderResizerContent(formData: FormData) {
+  "use server";
+  const supabase = await createClient();
+
+  const id = String(formData.get("lesson_item_id"));
+  const raw = String(formData.get("content") || "{}");
+
+  const parsed = sliderResizerContentSchema.parse(JSON.parse(raw));
+
+  const { error } = await supabase
+    .from("lesson_item_contents")
+    .upsert({ lesson_item_id: id, content: parsed });
 
   if (error) throw new Error(error.message);
 
