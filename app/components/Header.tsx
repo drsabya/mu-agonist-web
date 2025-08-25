@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { createClient } from "@/utils/supabase/server";
+import RouteProgress from "@/app/components/RouteProgress";
 
 export default async function Header() {
   const supabase = await createClient();
@@ -8,7 +9,10 @@ export default async function Header() {
   } = await supabase.auth.getUser();
 
   return (
-    <header className="w-full border-b border-gray-200 bg-white">
+    <header className="relative w-full border-b border-gray-200 bg-white">
+      {/* progress bar anchored to header bottom */}
+      <RouteProgress />
+
       <div className="mx-auto max-w-screen-lg px-4 py-4 flex items-center justify-between">
         {/* Brand */}
         <Link

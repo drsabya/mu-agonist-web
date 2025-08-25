@@ -6,6 +6,7 @@ import BaseEditor from "@/app/components/cms/lesson-items/BaseEditor";
 import ImageOverlayEditor from "@/app/components/cms/lesson-items/types/ImageOverlayEditor";
 import SliderMoverEditor from "@/app/components/cms/lesson-items/types/SliderMoverEditor";
 import SliderResizerEditor from "@/app/components/cms/lesson-items/types/SliderResizerEditor";
+import DragDropEditor from "@/app/components/cms/lesson-items/types/DragDropEditor";
 import { revalidatePath } from "next/cache";
 
 // CMS content helpers (your exact schema/defaults)
@@ -15,9 +16,11 @@ import {
   imageOverlayContentSchema,
   sliderMoverContentSchema,
   sliderResizerContentSchema,
+  dragDropContentSchema,
   type ImageOverlayContent,
   type SliderMoverContent,
   type SliderResizerContent,
+  type DragDropContent,
 } from "@/utils/cms";
 
 export const dynamic = "force-dynamic"; // avoid caching while editing
@@ -81,6 +84,7 @@ export default async function CMSItemPage({
   // RAW for coercion inside editors
   let sliderMoverInitialRaw: unknown = null;
   let sliderResizerInitialRaw: unknown = null;
+  let dragDropInitialRaw: unknown = null;
 
   if (item.type === "image-overlay") {
     const { data: contentRow } = await supabase
@@ -108,6 +112,14 @@ export default async function CMSItemPage({
       .maybeSingle();
 
     sliderResizerInitialRaw = contentRow?.content ?? null;
+  } else if (item.type === "drag-drop") {
+    const { data: contentRow } = await supabase
+      .from("lesson_item_contents")
+      .select("content")
+      .eq("lesson_item_id", id)
+      .maybeSingle();
+
+    dragDropInitialRaw = contentRow?.content ?? null;
   }
 
   return (
@@ -116,7 +128,8 @@ export default async function CMSItemPage({
         <header>
           <h1 className="text-xl font-semibold">{item.title || "Untitled"}</h1>
           <p className="mt-1 text-sm text-gray-500">
-            Type: <span className="font-mono">{item.type}</span> · Status: {item.status || "draft"}
+            Type: <span className="font-mono">{item.type}</span> · Status:{" "}
+            {item.status || "draft"}
           </p>
         </header>
 
@@ -140,7 +153,9 @@ export default async function CMSItemPage({
             <h2 className="text-lg font-semibold">Slider Mover</h2>
             <SliderMoverEditor
               itemId={id}
-              initialContent={sliderMoverInitialRaw as unknown as SliderMoverContent | null}
+              initialContent={
+                sliderMoverInitialRaw as unknown as SliderMoverContent | null
+              }
               onSave={saveSliderMoverContent}
             />
           </section>
@@ -151,8 +166,23 @@ export default async function CMSItemPage({
             <h2 className="text-lg font-semibold">Slider Resizer</h2>
             <SliderResizerEditor
               itemId={id}
-              initialContent={sliderResizerInitialRaw as unknown as SliderResizerContent | null}
+              initialContent={
+                sliderResizerInitialRaw as unknown as SliderResizerContent | null
+              }
               onSave={saveSliderResizerContent}
+            />
+          </section>
+        )}
+
+        {item.type === "drag-drop" && (
+          <section className="space-y-4">
+            <h2 className="text-lg font-semibold">Drag &amp; Drop</h2>
+            <DragDropEditor
+              itemId={id}
+              initialContent={
+                dragDropInitialRaw as unknown as DragDropContent | null
+              }
+              onSave={saveDragDropContent}
             />
           </section>
         )}
@@ -189,7 +219,10 @@ async function saveMetadataAction(formData: FormData) {
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from("lesson_items").update(payload).eq("id", id);
+  const { error } = await supabase
+    .from("lesson_items")
+    .update(payload)
+    .eq("id", id);
   if (error) throw new Error(error.message);
 
   revalidatePath(`/cms/${id}`);
@@ -242,6 +275,25 @@ async function saveSliderResizerContent(formData: FormData) {
   const raw = String(formData.get("content") || "{}");
 
   const parsed = sliderResizerContentSchema.parse(JSON.parse(raw));
+
+  const { error } = await supabase
+    .from("lesson_item_contents")
+    .upsert({ lesson_item_id: id, content: parsed });
+
+  if (error) throw new Error(error.message);
+
+  revalidatePath(`/cms/${id}`);
+}
+
+/* -------------------- Server Action: drag-drop content -------------------- */
+async function saveDragDropContent(formData: FormData) {
+  "use server";
+  const supabase = await createClient();
+
+  const id = String(formData.get("lesson_item_id"));
+  const raw = String(formData.get("content") || "{}");
+
+  const parsed = dragDropContentSchema.parse(JSON.parse(raw));
 
   const { error } = await supabase
     .from("lesson_item_contents")
