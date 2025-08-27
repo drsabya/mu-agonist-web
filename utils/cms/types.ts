@@ -3,12 +3,13 @@ export type ContentType =
   | "drag-drop"
   | "slider-mover"
   | "slider-resizer"
-  | "image-overlay";
+  | "media-overlay";
+
 export const ALLOWED_TYPES: ContentType[] = [
   "drag-drop",
   "slider-mover",
   "slider-resizer",
-  "image-overlay",
+  "media-overlay",
 ];
 
 // ===== Your exact interfaces =====
@@ -42,9 +43,28 @@ export interface DragDropTarget {
   feedback?: { text: string; src: string };
 }
 
-export interface ImageOverlayContent {
-  imageSrc: string;
-  overlaySrc: string;
+// ===== Media Overlay (replaces ImageOverlay) =====
+export type MediaKind = "image" | "svg" | "video";
+
+export type BaseMedia =
+  | { type: "image"; src: string }
+  | { type: "svg"; src: string }
+  | { type: "video"; src: string; hasAudio: boolean }; // autoplay, no controls, starts at 0 (render-time behavior)
+
+export type OverlayMedia =
+  | { type: "image"; src: string }
+  | { type: "svg"; src: string };
+
+export interface MediaOverlayOption {
+  title: string;
+  isCorrect: boolean;
+  feedback: string;
+}
+
+export interface MediaOverlayContent {
+  media: BaseMedia; // base can be image/svg/video
+  overlay: OverlayMedia; // overlay is image/svg
+  options: MediaOverlayOption[]; // can be []
   reference: string;
 }
 
@@ -101,10 +121,11 @@ export type ContentByTypeMap = {
   "drag-drop": DragDropContent;
   "slider-mover": SliderMoverContent;
   "slider-resizer": SliderResizerContent;
-  "image-overlay": ImageOverlayContent;
+  "media-overlay": MediaOverlayContent;
 };
+
 export type AnyContent =
   | DragDropContent
   | SliderMoverContent
   | SliderResizerContent
-  | ImageOverlayContent;
+  | MediaOverlayContent;

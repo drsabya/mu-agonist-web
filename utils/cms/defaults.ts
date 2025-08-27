@@ -29,9 +29,10 @@ const templates: { [K in ContentType]: ContentByTypeMap[K] } = {
     reference: "",
   },
 
-  "image-overlay": {
-    imageSrc: "",
-    overlaySrc: "",
+  "media-overlay": {
+    media: { type: "image", src: "" }, // change to { type: "video", src: "", hasAudio: true } when needed
+    overlay: { type: "image", src: "" },
+    options: [],
     reference: "",
   },
 

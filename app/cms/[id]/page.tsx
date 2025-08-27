@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import AdminGuard from "@/app/components/auth/AdminGuard";
 import BaseEditor from "@/app/components/cms/lesson-items/BaseEditor";
-import ImageOverlayEditor from "@/app/components/cms/lesson-items/types/ImageOverlayEditor";
+import MediaOverlayEditor from "@/app/components/cms/lesson-items/types/MediaOverlayEditor";
 import SliderMoverEditor from "@/app/components/cms/lesson-items/types/SliderMoverEditor";
 import SliderResizerEditor from "@/app/components/cms/lesson-items/types/SliderResizerEditor";
 import DragDropEditor from "@/app/components/cms/lesson-items/types/DragDropEditor";
@@ -13,11 +13,11 @@ import { revalidatePath } from "next/cache";
 import {
   isContentValid,
   getDefaultContent,
-  imageOverlayContentSchema,
+  mediaOverlayContentSchema,
   sliderMoverContentSchema,
   sliderResizerContentSchema,
   dragDropContentSchema,
-  type ImageOverlayContent,
+  type MediaOverlayContent,
   type SliderMoverContent,
   type SliderResizerContent,
   type DragDropContent,
@@ -79,23 +79,23 @@ export default async function CMSItemPage({
   if (error || !item) notFound();
 
   // -------- Fetch content (per-type) --------
-  let imageOverlayContent: ImageOverlayContent | null = null;
+  let mediaOverlayContent: MediaOverlayContent | null = null;
 
   // RAW for coercion inside editors
   let sliderMoverInitialRaw: unknown = null;
   let sliderResizerInitialRaw: unknown = null;
   let dragDropInitialRaw: unknown = null;
 
-  if (item.type === "image-overlay") {
+  if (item.type === "media-overlay") {
     const { data: contentRow } = await supabase
       .from("lesson_item_contents")
       .select("content")
       .eq("lesson_item_id", id)
       .maybeSingle();
 
-    imageOverlayContent = isContentValid("image-overlay", contentRow?.content)
-      ? (contentRow!.content as ImageOverlayContent)
-      : getDefaultContent("image-overlay");
+    mediaOverlayContent = isContentValid("media-overlay", contentRow?.content)
+      ? (contentRow!.content as MediaOverlayContent)
+      : getDefaultContent("media-overlay");
   } else if (item.type === "slider-mover") {
     const { data: contentRow } = await supabase
       .from("lesson_item_contents")
@@ -137,13 +137,13 @@ export default async function CMSItemPage({
         <BaseEditor item={item} onSaveAction={saveMetadataAction} />
 
         {/* ---------- Type-specific editors ---------- */}
-        {item.type === "image-overlay" && imageOverlayContent && (
+        {item.type === "media-overlay" && mediaOverlayContent && (
           <section className="space-y-4">
-            <h2 className="text-lg font-semibold">Image Overlay</h2>
-            <ImageOverlayEditor
+            <h2 className="text-lg font-semibold">Media Overlay</h2>
+            <MediaOverlayEditor
               itemId={id}
-              initialContent={imageOverlayContent}
-              onSave={saveImageOverlayContent}
+              initialContent={mediaOverlayContent}
+              onSave={saveMediaOverlayContent}
             />
           </section>
         )}
@@ -228,15 +228,15 @@ async function saveMetadataAction(formData: FormData) {
   revalidatePath(`/cms/${id}`);
 }
 
-/* -------------------- Server Action: image-overlay content -------------------- */
-async function saveImageOverlayContent(formData: FormData) {
+/* -------------------- Server Action: media-overlay content -------------------- */
+async function saveMediaOverlayContent(formData: FormData) {
   "use server";
   const supabase = await createClient();
 
   const id = String(formData.get("lesson_item_id"));
   const raw = String(formData.get("content") || "{}");
 
-  const parsed = imageOverlayContentSchema.parse(JSON.parse(raw));
+  const parsed = mediaOverlayContentSchema.parse(JSON.parse(raw));
 
   const { error } = await supabase
     .from("lesson_item_contents")
