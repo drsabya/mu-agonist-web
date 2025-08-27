@@ -22,6 +22,7 @@ export interface DragDropItem {
   id: string;
   title: string;
   src: string;
+  // text: string;
   group?: string;
   position: {
     initial: { x: number; y: number };

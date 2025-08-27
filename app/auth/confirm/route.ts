@@ -1,28 +1,31 @@
 import { type EmailOtpType } from "@supabase/supabase-js";
-import { type NextRequest } from "next/server";
-import { redirect } from "next/navigation";
+import { type NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/utils/supabase/server";
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const next = searchParams.get("next") ?? "/";
+  const url = new URL(request.url);
+  const next = url.searchParams.get("next") ?? "/";
+  const supabase = await createClient();
 
-  // --- OAuth (Google) ---
-  const code = searchParams.get("code");
+  // --- OAuth (e.g., Google) ---
+  const code = url.searchParams.get("code");
   if (code) {
-    const supabase = await createClient(); // ⬅️ await here
-    await supabase.auth.exchangeCodeForSession(code);
-    redirect(next);
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    const dest = new URL(error ? "/auth/login?error=oauth" : next, url.origin);
+    return NextResponse.redirect(dest);
   }
 
-  // --- Email OTP (magic link, etc.) ---
-  const token_hash = searchParams.get("token_hash");
-  const type = searchParams.get("type") as EmailOtpType | null;
+  // --- Email OTP / Magic Link ---
+  const token_hash = url.searchParams.get("token_hash");
+  const type = url.searchParams.get("type") as EmailOtpType | null;
   if (token_hash && type) {
-    const supabase = await createClient(); // ⬅️ await here
     const { error } = await supabase.auth.verifyOtp({ type, token_hash });
-    if (!error) redirect(next);
+    const dest = new URL(error ? "/auth/login?error=otp" : next, url.origin);
+    return NextResponse.redirect(dest);
   }
 
-  redirect("/error");
+  // Nothing to handle
+  return NextResponse.redirect(
+    new URL("/auth/login?error=missing_params", url.origin)
+  );
 }

@@ -1,15 +1,24 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 
 export default function LoginPage() {
   const supabase = createClient();
+  const searchParams = useSearchParams();
 
   const handleGoogleLogin = async () => {
+    const origin =
+      typeof window !== "undefined"
+        ? window.location.origin
+        : process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+
+    const next = searchParams.get("next") ?? "/";
+
     await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: `${window.location.origin}/auth/confirm`,
+        redirectTo: `${origin}/auth/confirm?next=${encodeURIComponent(next)}`,
       },
     });
   };
