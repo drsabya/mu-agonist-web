@@ -11,6 +11,7 @@ const CREATE_TYPES: Array<{ type: ContentType; label: string }> = [
   { type: "slider-mover", label: "Slider Mover" },
   { type: "slider-resizer", label: "Slider Resizer" },
   { type: "media-overlay", label: "Media Overlay" },
+  { type: "tap-hotspot", label: "Tap Hotspot" },
 ];
 
 export default async function CMSPage() {

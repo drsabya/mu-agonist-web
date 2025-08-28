@@ -1,7 +1,11 @@
 // app/cms/new/page.tsx
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
-import { ALLOWED_TYPES, type ContentType, getDefaultContent } from "@/utils/cms";
+import {
+  ALLOWED_TYPES,
+  type ContentType,
+  getDefaultContent,
+} from "@/utils/cms";
 
 export default async function NewLessonItemPage({
   searchParams,
@@ -9,7 +13,9 @@ export default async function NewLessonItemPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const params = await searchParams; // ✅ await it
-  const rawType = (Array.isArray(params?.type) ? params.type[0] : params?.type || "").toLowerCase();
+  const rawType = (
+    Array.isArray(params?.type) ? params.type[0] : params?.type || ""
+  ).toLowerCase();
 
   if (!ALLOWED_TYPES.includes(rawType as ContentType)) redirect("/cms");
   const type = rawType as ContentType;
@@ -22,7 +28,8 @@ export default async function NewLessonItemPage({
     .select()
     .single();
 
-  if (itemError || !item) throw new Error(itemError?.message ?? "Failed to create lesson item");
+  if (itemError || !item)
+    throw new Error(itemError?.message ?? "Failed to create lesson item");
 
   const defaultContent = getDefaultContent(type);
   const { error: contentError } = await supabase

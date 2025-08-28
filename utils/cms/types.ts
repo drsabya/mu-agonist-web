@@ -3,13 +3,15 @@ export type ContentType =
   | "drag-drop"
   | "slider-mover"
   | "slider-resizer"
-  | "media-overlay";
+  | "media-overlay"
+  | "tap-hotspot";
 
 export const ALLOWED_TYPES: ContentType[] = [
   "drag-drop",
   "slider-mover",
   "slider-resizer",
   "media-overlay",
+  "tap-hotspot",
 ];
 
 // ===== Your exact interfaces =====
@@ -116,16 +118,33 @@ export interface SliderMoverContent {
   overlay: { src: string; opacity: number };
 }
 
+// ===== Tap Hotspot =====
+export interface TapHotspotOption {
+  title: string;
+  src: string;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+  feedback: { text: string; src: string };
+  isCorrect: boolean;
+}
+
+export interface TapHotspotContent {
+  bg: { src: string; color: string };
+  options: TapHotspotOption[];
+}
+
 // Helpful mapping types for consumers
 export type ContentByTypeMap = {
   "drag-drop": DragDropContent;
   "slider-mover": SliderMoverContent;
   "slider-resizer": SliderResizerContent;
   "media-overlay": MediaOverlayContent;
+  "tap-hotspot": TapHotspotContent;
 };
 
 export type AnyContent =
   | DragDropContent
   | SliderMoverContent
   | SliderResizerContent
-  | MediaOverlayContent;
+  | MediaOverlayContent
+  | TapHotspotContent;

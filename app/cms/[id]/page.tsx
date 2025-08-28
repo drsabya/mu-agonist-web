@@ -7,6 +7,7 @@ import MediaOverlayEditor from "@/app/components/cms/lesson-items/types/MediaOve
 import SliderMoverEditor from "@/app/components/cms/lesson-items/types/SliderMoverEditor";
 import SliderResizerEditor from "@/app/components/cms/lesson-items/types/SliderResizerEditor";
 import DragDropEditor from "@/app/components/cms/lesson-items/types/DragDropEditor";
+import TapHotspotEditor from "@/app/components/cms/lesson-items/types/TapHotspotEditor";
 import { revalidatePath } from "next/cache";
 
 // CMS content helpers (your exact schema/defaults)
@@ -17,10 +18,12 @@ import {
   sliderMoverContentSchema,
   sliderResizerContentSchema,
   dragDropContentSchema,
+  tapHotspotContentSchema,
   type MediaOverlayContent,
   type SliderMoverContent,
   type SliderResizerContent,
   type DragDropContent,
+  type TapHotspotContent,
 } from "@/utils/cms";
 
 export const dynamic = "force-dynamic"; // avoid caching while editing
@@ -85,6 +88,7 @@ export default async function CMSItemPage({
   let sliderMoverInitialRaw: unknown = null;
   let sliderResizerInitialRaw: unknown = null;
   let dragDropInitialRaw: unknown = null;
+  let tapHotspotInitialRaw: unknown = null;
 
   if (item.type === "media-overlay") {
     const { data: contentRow } = await supabase
@@ -120,6 +124,14 @@ export default async function CMSItemPage({
       .maybeSingle();
 
     dragDropInitialRaw = contentRow?.content ?? null;
+  } else if (item.type === "tap-hotspot") {
+    const { data: contentRow } = await supabase
+      .from("lesson_item_contents")
+      .select("content")
+      .eq("lesson_item_id", id)
+      .maybeSingle();
+
+    tapHotspotInitialRaw = contentRow?.content ?? null;
   }
 
   return (
@@ -183,6 +195,19 @@ export default async function CMSItemPage({
                 dragDropInitialRaw as unknown as DragDropContent | null
               }
               onSave={saveDragDropContent}
+            />
+          </section>
+        )}
+
+        {item.type === "tap-hotspot" && (
+          <section className="space-y-4">
+            <h2 className="text-lg font-semibold">Tap Hotspot</h2>
+            <TapHotspotEditor
+              itemId={id}
+              initialContent={
+                tapHotspotInitialRaw as unknown as TapHotspotContent | null
+              }
+              onSave={saveTapHotspotContent}
             />
           </section>
         )}
@@ -294,6 +319,25 @@ async function saveDragDropContent(formData: FormData) {
   const raw = String(formData.get("content") || "{}");
 
   const parsed = dragDropContentSchema.parse(JSON.parse(raw));
+
+  const { error } = await supabase
+    .from("lesson_item_contents")
+    .upsert({ lesson_item_id: id, content: parsed });
+
+  if (error) throw new Error(error.message);
+
+  revalidatePath(`/cms/${id}`);
+}
+
+/* -------------------- Server Action: tap-hotspot content -------------------- */
+async function saveTapHotspotContent(formData: FormData) {
+  "use server";
+  const supabase = await createClient();
+
+  const id = String(formData.get("lesson_item_id"));
+  const raw = String(formData.get("content") || "{}");
+
+  const parsed = tapHotspotContentSchema.parse(JSON.parse(raw));
 
   const { error } = await supabase
     .from("lesson_item_contents")
