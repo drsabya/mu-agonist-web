@@ -29,9 +29,10 @@ const templates: { [K in ContentType]: ContentByTypeMap[K] } = {
     reference: "",
   },
 
-  "image-overlay": {
-    imageSrc: "",
-    overlaySrc: "",
+  "media-overlay": {
+    media: { type: "image", src: "" }, // change to { type: "video", src: "", hasAudio: true } when needed
+    overlay: { type: "image", src: "" },
+    options: [],
     reference: "",
   },
 
@@ -77,6 +78,28 @@ const templates: { [K in ContentType]: ContentByTypeMap[K] } = {
     thresholds: [],
     bg: { src: "", color: "#ffffff" },
     overlay: { src: "", opacity: 0 },
+  },
+
+  "tap-hotspot": {
+    bg: { src: "", color: "#ffffff" },
+    options: [
+      {
+        title: "Hotspot A",
+        src: "",
+        position: { x: 0.25, y: 0.35 },
+        size: { width: 0.2, height: 0.12 },
+        feedback: { text: "Not quite—try again.", src: "" },
+        isCorrect: false,
+      },
+      {
+        title: "Hotspot B",
+        src: "",
+        position: { x: 0.62, y: 0.4 },
+        size: { width: 0.2, height: 0.12 },
+        feedback: { text: "Correct!", src: "" },
+        isCorrect: true,
+      },
+    ],
   },
 };
 

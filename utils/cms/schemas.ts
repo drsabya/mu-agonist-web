@@ -48,10 +48,32 @@ export const dragDropContentSchema = z.object({
   reference: z.string().optional(),
 });
 
-// ----- ImageOverlay -----
-export const imageOverlayContentSchema = z.object({
-  imageSrc: z.string(),
-  overlaySrc: z.string(),
+// ----- MediaOverlay (replaces ImageOverlay) -----
+const baseMediaSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("image"), src: z.string() }),
+  z.object({ type: z.literal("svg"), src: z.string() }),
+  z.object({
+    type: z.literal("video"),
+    src: z.string(),
+    hasAudio: z.boolean(), // autoplay, starts at 0, no controls (render-time behavior)
+  }),
+]);
+
+const overlayMediaSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("image"), src: z.string() }),
+  z.object({ type: z.literal("svg"), src: z.string() }),
+]);
+
+export const mediaOverlayOptionSchema = z.object({
+  title: z.string(),
+  isCorrect: z.boolean(),
+  feedback: z.string(),
+});
+
+export const mediaOverlayContentSchema = z.object({
+  media: baseMediaSchema, // image | svg | video
+  overlay: overlayMediaSchema, // image | svg
+  options: z.array(mediaOverlayOptionSchema), // can be []
   reference: z.string(),
 });
 
@@ -101,13 +123,32 @@ export const sliderMoverContentSchema = z.object({
   overlay: z.object({ src: z.string(), opacity: z.number().min(0).max(1) }),
 });
 
+// ----- TapHotspot -----
+export const tapHotspotOptionSchema = z.object({
+  title: z.string(),
+  src: z.string(), // <-- added to mirror interface
+  position: positionXY,
+  size: sizeWH,
+  feedback: z.object({
+    text: z.string(),
+    src: z.string(),
+  }),
+  isCorrect: z.boolean(),
+});
+
+export const tapHotspotContentSchema = z.object({
+  bg: z.object({ src: z.string(), color: z.string() }),
+  options: z.array(tapHotspotOptionSchema),
+});
+
 // ----- Map + helpers -----
-const schemaMap = {
+const schemaMap: Record<ContentType, z.ZodTypeAny> = {
   "drag-drop": dragDropContentSchema,
-  "image-overlay": imageOverlayContentSchema,
+  "media-overlay": mediaOverlayContentSchema,
   "slider-resizer": sliderResizerContentSchema,
   "slider-mover": sliderMoverContentSchema,
-} as const;
+  "tap-hotspot": tapHotspotContentSchema,
+};
 
 export function getSchema<T extends ContentType>(type: T) {
   return schemaMap[type];

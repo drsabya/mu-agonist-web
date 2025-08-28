@@ -1,12 +1,18 @@
 import Link from "next/link";
 import { createClient } from "@/utils/supabase/server";
 import RouteProgress from "@/app/components/RouteProgress";
+import { getUserRole } from "@/utils/supabase/getUserRole";
 
 export default async function Header() {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  // SSR role lookup (reads cookies server-side)
+  const role = await getUserRole();
+
+  const canSeeCMS = role === "admin" || role === "superadmin";
 
   return (
     <header className="relative w-full border-b border-gray-200 bg-white">
@@ -31,13 +37,17 @@ export default async function Header() {
             About
           </Link>
 
-          {user && (
-            <Link href="/profile" className="hover:text-gray-900">
-              Profile
+          {canSeeCMS && (
+            <Link href="/cms" className="hover:text-gray-900">
+              CMS
             </Link>
           )}
 
-          {!user && (
+          {user ? (
+            <Link href="/profile" className="hover:text-gray-900">
+              Profile
+            </Link>
+          ) : (
             <Link
               href="/auth/login"
               className="text-emerald-600 hover:text-emerald-800"

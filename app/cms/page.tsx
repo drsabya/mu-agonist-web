@@ -1,3 +1,4 @@
+// app/cms/page.tsx
 import Link from "next/link";
 import AdminGuard from "@/app/components/auth/AdminGuard";
 import { createClient } from "@/utils/supabase/server";
@@ -9,7 +10,8 @@ const CREATE_TYPES: Array<{ type: ContentType; label: string }> = [
   { type: "drag-drop", label: "Drag Drop" },
   { type: "slider-mover", label: "Slider Mover" },
   { type: "slider-resizer", label: "Slider Resizer" },
-  { type: "image-overlay", label: "Image Overlay" },
+  { type: "media-overlay", label: "Media Overlay" },
+  { type: "tap-hotspot", label: "Tap Hotspot" },
 ];
 
 export default async function CMSPage() {
@@ -24,7 +26,8 @@ export default async function CMSPage() {
 
   const total = lessons?.length ?? 0;
   const drafts = lessons?.filter((l) => l.status === "draft").length ?? 0;
-  const published = lessons?.filter((l) => l.status === "published").length ?? 0;
+  const published =
+    lessons?.filter((l) => l.status === "published").length ?? 0;
 
   const stats = [
     { label: "Total Lessons", value: total },
@@ -38,7 +41,9 @@ export default async function CMSPage() {
         <header className="mb-6 flex items-end justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">CMS Dashboard</h1>
-            <p className="mt-1 text-sm text-gray-500">Admin-only controls & insights</p>
+            <p className="mt-1 text-sm text-gray-500">
+              Admin-only controls & insights
+            </p>
           </div>
 
           {/* Quick create (optional top-right button to default type) */}
@@ -53,7 +58,10 @@ export default async function CMSPage() {
         {/* Stats */}
         <section className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {stats.map((s) => (
-            <div key={s.label} className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+            <div
+              key={s.label}
+              className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm"
+            >
               <p className="text-xs text-gray-500">{s.label}</p>
               <p className="mt-2 text-2xl font-semibold">{s.value}</p>
             </div>
