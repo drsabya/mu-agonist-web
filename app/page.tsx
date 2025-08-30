@@ -5,6 +5,7 @@ import { useAuth } from "@/app/providers/AuthProvider";
 
 export default function Home() {
   const { role } = useAuth();
+  const isAdmin = role === "admin";
 
   return (
     <main className="flex flex-col bg-white text-black">
@@ -29,17 +30,28 @@ export default function Home() {
           Stay tuned! Something amazing is coming soon 🚀
         </p>
 
-        {/* Admin-only CMS link */}
-        {role === "admin" && (
-          <div className="mt-10">
+        {/* CTAs */}
+        <div className="mt-10 flex flex-col sm:flex-row items-center gap-3">
+          {/* Tools link (visible to everyone) */}
+          <Link
+            href="/tools"
+            className="rounded-full border border-gray-900 px-6 py-3 text-sm font-medium text-gray-900 hover:bg-gray-100 transition"
+            aria-label="Browse tools"
+          >
+            Explore Tools &rarr;
+          </Link>
+
+          {/* Admin-only CMS link */}
+          {isAdmin && (
             <Link
               href="/cms"
               className="rounded-full bg-gray-900 px-6 py-3 text-white text-sm font-medium hover:bg-gray-700 transition"
+              aria-label="Go to CMS"
             >
               Go to CMS &rarr;
             </Link>
-          </div>
-        )}
+          )}
+        </div>
       </section>
     </main>
   );
