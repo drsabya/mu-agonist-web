@@ -36,17 +36,30 @@ export default async function ProfilePage() {
     <main className="mx-auto max-w-screen-sm px-4 py-10 font-mono">
       <h1 className="mb-6 text-2xl font-bold">Profile</h1>
       <div className="space-y-3 text-sm">
-        <div><span className="text-gray-500">Name:</span> {name}</div>
-        <div><span className="text-gray-500">Email:</span> {email}</div>
-        <div><span className="text-gray-500">Role:</span> {role}</div>
+        <div>
+          <span className="text-gray-500">Name:</span> {name}
+        </div>
+        <div>
+          <span className="text-gray-500">Email:</span> {email}
+        </div>
+        <div>
+          <span className="text-gray-500">Role:</span> {role}
+        </div>
       </div>
 
-      <div className="mt-8">
+      <div className="mt-8 flex flex-col gap-3">
         <a
           href="/auth/signout"
           className="inline-block rounded bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-700"
         >
           Sign out
+        </a>
+
+        <a
+          href="/profile/delete-account"
+          className="inline-block rounded border border-neutral-300 px-4 py-2 text-sm font-bold text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
+        >
+          Delete Account
         </a>
       </div>
     </main>
