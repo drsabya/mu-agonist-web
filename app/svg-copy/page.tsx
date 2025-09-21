@@ -81,6 +81,14 @@ function extractFromPlain(text: string): string[] {
 
 /* --- Tiny monochrome icons (no deps) --- */
 const I = {
+  paste: (
+    <svg className="size-4" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M19 3h-4.18C14.4 1.84 13.3 1 12 1s-2.4.84-2.82 2H5a2 2 0 00-2 2v12a2 2 0 002 2h6v-2H5V5h2v2h10V5h2v5h2V5a2 2 0 00-2-2zM12 3a1 1 0 110 2 1 1 0 010-2zm5 10l-5 5-3-3-1.5 1.5 4.5 4.5 6.5-6.5L17 13z"
+        fill="currentColor"
+      />
+    </svg>
+  ),
   undo: (
     <svg className="size-4" viewBox="0 0 24 24" aria-hidden>
       <path
@@ -234,8 +242,8 @@ export default function SvgCopyPage() {
     const measure = () => {
       const r = el.getBoundingClientRect();
       const c = canvasEl.getBoundingClientRect();
-      const x = Math.round(r.left - c.left); // relative to canvas
-      const y = Math.round(r.top - c.top); // relative to canvas
+      const x = Math.round(r.left - c.left);
+      const y = Math.round(r.top - c.top);
       const w = Math.round(r.width);
       const h = Math.round(r.height);
       setSelInfo({ x, y, w, h });
@@ -250,7 +258,7 @@ export default function SvgCopyPage() {
     };
   }, [items, selectedId, canvasSize]);
 
-  /* ====== Clipboard Paste (single-flavor parse to avoid duplicates) ====== */
+  /* ====== Clipboard Paste: keyboard (desktop) ====== */
   useEffect(() => {
     const onPaste = async (e: ClipboardEvent) => {
       if (!e.clipboardData) return;
@@ -286,15 +294,98 @@ export default function SvgCopyPage() {
       }
 
       if (!payload || !flavor) return;
+      await applyPastedPayload(payload, flavor, true);
+      e.preventDefault();
+    };
 
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
+
+  /* ===== Mobile-friendly paste button ===== */
+  const pasteFromClipboard = useCallback(async () => {
+    try {
+      // Type-safe navigator with optional richer clipboard API
+      const nav = navigator as Navigator & {
+        clipboard?: {
+          read?: () => Promise<ClipboardItem[]>;
+          readText?: () => Promise<string>;
+        };
+      };
+
+      if (nav.clipboard?.read) {
+        const items = await nav.clipboard.read();
+        // Look for svg -> html -> plain
+        let payload: string | null = null;
+        let flavor: "image/svg+xml" | "text/html" | "text/plain" | null = null;
+
+        for (const ci of items) {
+          if (ci.types?.includes("image/svg+xml")) {
+            const blob = await ci.getType("image/svg+xml");
+            payload = await blob.text();
+            flavor = "image/svg+xml";
+            break;
+          }
+        }
+        if (!payload) {
+          for (const ci of items) {
+            if (ci.types?.includes("text/html")) {
+              const blob = await ci.getType("text/html");
+              payload = await blob.text();
+              flavor = "text/html";
+              break;
+            }
+          }
+        }
+        if (!payload) {
+          for (const ci of items) {
+            if (ci.types?.includes("text/plain")) {
+              const blob = await ci.getType("text/plain");
+              payload = await blob.text();
+              flavor = "text/plain";
+              break;
+            }
+          }
+        }
+
+        if (payload && flavor) {
+          await applyPastedPayload(payload, flavor, false);
+          return;
+        }
+      }
+
+      // Fallback for Safari/iOS: readText only
+      if (navigator.clipboard && "readText" in navigator.clipboard) {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          await applyPastedPayload(text, "text/plain", false);
+          return;
+        }
+      }
+
+      alert(
+        "Clipboard read not available. Try copying again, then tap Paste in Safari’s share menu or use desktop Cmd/Ctrl+V."
+      );
+    } catch (err) {
+      console.error(err);
+      alert(
+        "Could not access clipboard. On iOS Safari, allow clipboard access or try readText()."
+      );
+    }
+  }, []);
+
+  const applyPastedPayload = useCallback(
+    async (
+      payload: string,
+      flavor: "image/svg+xml" | "text/html" | "text/plain",
+      _fromKeyboard: boolean
+    ) => {
       let svgs: string[] = [];
       if (flavor === "image/svg+xml") svgs = extractFromSvgXml(payload);
       else if (flavor === "text/html") svgs = extractFromHtml(payload);
       else svgs = extractFromPlain(payload);
 
       if (svgs.length === 0) return;
-
-      e.preventDefault();
 
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -315,11 +406,9 @@ export default function SvgCopyPage() {
 
       setItems((prev) => [...prev, ...newItems]);
       setSelectedId(newItems[newItems.length - 1].id);
-    };
-
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  }, [pushSnapshot]);
+    },
+    [pushSnapshot]
+  );
 
   /* ====== Keyboard: Undo / Delete / Duplicate ====== */
   useEffect(() => {
@@ -414,7 +503,6 @@ export default function SvgCopyPage() {
 
     const target = e.target as HTMLElement;
 
-    // Detect handles via closest() so any child within hitbox works
     const isRotateHit = !!target.closest('[data-handle="rotate"]');
     const isResizeHit = !!target.closest('[data-handle="resize"]');
 
@@ -591,8 +679,15 @@ export default function SvgCopyPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-800 font-mono">
       <div className="w-full max-w-xl px-3">
-        {/* Toolbar: icons only, wraps on narrow widths */}
+        {/* Toolbar: icons only, wraps on narrow widths (added Paste button for mobile) */}
         <div className="mb-2 flex flex-wrap items-center justify-center gap-1">
+          <button
+            className="p-1 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 active:bg-gray-200"
+            onClick={pasteFromClipboard}
+            title="Paste from clipboard (mobile/desktop)"
+          >
+            {I.paste}
+          </button>
           <button
             className="p-1 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 active:bg-gray-200"
             onClick={undo}
@@ -656,7 +751,7 @@ export default function SvgCopyPage() {
           ref={canvasRef}
           className="relative bg-white border border-gray-300 shadow-sm"
           style={{
-            width: 360, // adjust if you want
+            width: 360,
             height: 640,
             overflow: "hidden",
             userSelect: "none",
@@ -676,7 +771,7 @@ export default function SvgCopyPage() {
                   width: `${it.wPct * 100}%`,
                   transform: "translate(-50%, -50%)",
                   cursor: isSelected ? "grabbing" : "grab",
-                  outline: isSelected ? "2px solid rgba(31,41,55,0.9)" : "none", // gray-800
+                  outline: isSelected ? "2px solid rgba(31,41,55,0.9)" : "none",
                   outlineOffset: 2,
                 }}
                 onPointerDown={(e) => onItemPointerDown(e, it.id)}
@@ -737,11 +832,16 @@ export default function SvgCopyPage() {
           {items.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="text-xs text-gray-500 text-center px-2 leading-relaxed">
-                Paste SVG with{" "}
+                Paste SVG: tap{" "}
+                <span className="px-1 border border-gray-300 rounded">
+                  Paste
+                </span>{" "}
+                (mobile) or use{" "}
                 <kbd className="px-1 border border-gray-300 rounded">Cmd</kbd>/
                 <kbd className="px-1 border border-gray-300 rounded">Ctrl</kbd>+
-                <kbd className="px-1 border border-gray-300 rounded">V</kbd>.
-                Select → drag. Resize corner. Rotate top knob. Duplicate:{" "}
+                <kbd className="px-1 border border-gray-300 rounded">V</kbd>{" "}
+                (desktop). Select → drag. Resize corner. Rotate top knob.
+                Duplicate:{" "}
                 <span className="px-1 border border-gray-300 rounded">
                   Cmd/Ctrl+D
                 </span>
@@ -755,30 +855,29 @@ export default function SvgCopyPage() {
           )}
         </div>
 
-        {/* Info panel below canvas (monochrome, compact) */}
-        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-700">
+        {/* Info panel below canvas (stacked sections) */}
+        <div className="mt-3 space-y-2 text-xs text-gray-800">
           <div className="border border-gray-200 bg-white rounded p-2">
             <div className="font-semibold mb-1">Canvas</div>
-            <div className="space-y-0.5">
-              <div>W: {canvasSize.w}px</div>
-              <div>H: {canvasSize.h}px</div>
-              <div>Aspect: 9:16</div>
-            </div>
+            <div>W: {canvasSize.w}px</div>
+            <div>H: {canvasSize.h}px</div>
+            <div>Aspect: 9:16</div>
           </div>
 
           <div className="border border-gray-200 bg-white rounded p-2">
             <div className="font-semibold mb-1">Selected</div>
-            {selectedId && (
-              <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+            {selectedId ? (
+              <>
                 <div>X: {selInfo.x}px</div>
                 <div>Y: {selInfo.y}px</div>
                 <div>W: {selInfo.w}px</div>
                 <div>H: {selInfo.h}px</div>
-                <div>Index: {selectedIndex}</div>
-                <div>Rot: {rotDeg}°</div>
-              </div>
+                <div>Index (z): {selectedIndex}</div>
+                <div>Rotation: {rotDeg}°</div>
+              </>
+            ) : (
+              <div className="text-gray-400">None</div>
             )}
-            {!selectedId && <div className="text-gray-400">None</div>}
           </div>
         </div>
       </div>
