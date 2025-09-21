@@ -2,27 +2,26 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-/** Roles and item model */
-type Role = "none" | "draggable" | "target" | "tappable";
+/** Item model */
 type Kind = "svg" | "image";
-
+type MoveDir = "horizontal" | "vertical" | "diag1" | "diag2";
 type Item = {
   id: string;
   kind: Kind;
+
   // For SVG
-  svg?: string; // sanitized & namespaced <svg>…</svg>
+  svg?: string;
   // For Image
-  src?: string; // data URL for pasted images (png/jpg/webp)
+  src?: string;
 
-  cxPct: number; // center X as fraction of canvas width [0..1]
-  cyPct: number; // center Y as fraction of canvas height [0..1]
+  cxPct: number; // center X [0..1]
+  cyPct: number; // center Y [0..1]
   wPct: number; // width as fraction of canvas width [0..1]
-  rot: number; // rotation in radians
-  role: Role;
+  rot: number; // radians
 
-  // role-specific metadata
-  correctTargetId?: string; // for role === 'draggable'
-  tapMessage?: string; // for role === 'tappable'
+  moveable: boolean; // mutually exclusive with resizeable
+  resizeable: boolean; // mutually exclusive with moveable
+  moveDir: MoveDir; // used only if moveable
 };
 
 type Snapshot = { items: Item[]; selectedId: string | null; canvasBg: string };
@@ -35,31 +34,19 @@ function canonicalize(s: string) {
   return s.replace(/\s+/g, " ").trim();
 }
 
-/** Remove XML/DOCTYPE noise commonly present in clipboard SVGs */
 function stripXmlDoctype(s: string) {
   return s.replace(/<\?xml[^>]*\?>/gi, "").replace(/<!DOCTYPE[^>]*>/gi, "");
 }
 
-/**
- * Namespace all ids inside an SVG string to avoid collisions between multiple pasted SVGs.
- * This fixes Chrome cases where the second paste appears blank due to duplicated ids in <defs>/<clipPath>/etc.
- */
+/** Namespace ids inside an SVG string to avoid Chrome duplicate-id blank bug */
 function namespaceSvgIds(svg: string, ns: string) {
   let out = stripXmlDoctype(svg);
-
-  // id="foo" -> id="foo_ns"
   out = out.replace(/\bid="([\w:-]+)"/g, (_m, id) => `id="${id}_${ns}"`);
-
-  // url(#foo) -> url(#foo_ns)
   out = out.replace(/\burl\(#([\w:-]+)\)/g, (_m, id) => `url(#${id}_${ns})`);
-
-  // href="#foo" / xlink:href="#foo" -> "#foo_ns"
   out = out.replace(
     /\b(xlink:href|href)="#([\w:-]+)"/g,
     (_m, attr, id) => `${attr}="#${id}_${ns}"`
   );
-
-  // aria-labelledby="a b c" -> suffixed
   out = out.replace(/\baria-labelledby="([^"]+)"/g, (_m, ids) => {
     const replaced = ids
       .split(/\s+/)
@@ -67,11 +54,9 @@ function namespaceSvgIds(svg: string, ns: string) {
       .join(" ");
     return `aria-labelledby="${replaced}"`;
   });
-
   return out;
 }
 
-/** Extract SVGs when payload MIME is image/svg+xml. (XML parser only) */
 function extractFromSvgXml(xml: string): string[] {
   const cleaned = stripXmlDoctype(xml);
   const p = new DOMParser();
@@ -91,7 +76,6 @@ function extractFromSvgXml(xml: string): string[] {
   return out;
 }
 
-/** Extract SVGs when payload MIME is text/html. (HTML parser only) */
 function extractFromHtml(html: string): string[] {
   const p = new DOMParser();
   const doc = p.parseFromString(html, "text/html");
@@ -108,7 +92,6 @@ function extractFromHtml(html: string): string[] {
   return out;
 }
 
-/** Extract SVGs when payload MIME is text/plain. (Regex only) */
 function extractFromPlain(text: string): string[] {
   const cleaned = stripXmlDoctype(text);
   const matches = cleaned.match(/<svg[\s\S]*?<\/svg>/gi) ?? [];
@@ -126,7 +109,6 @@ function extractFromPlain(text: string): string[] {
   return out;
 }
 
-/** Convert Blob -> data URL (for images) */
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const fr = new FileReader();
@@ -233,14 +215,6 @@ const I = {
       <path d="M6 6h12v12H6z" fill="currentColor" />
     </svg>
   ),
-  check: (
-    <svg className="size-4" viewBox="0 0 24 24" aria-hidden>
-      <path
-        d="M9 16.2l-3.5-3.6L4 14.2l5 5 11-11-1.5-1.4z"
-        fill="currentColor"
-      />
-    </svg>
-  ),
   layers: (
     <svg className="size-4" viewBox="0 0 24 24" aria-hidden>
       <path
@@ -249,40 +223,59 @@ const I = {
       />
     </svg>
   ),
+  horiz: (
+    <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M3 12h18M15 6l6 6-6 6"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  vert: (
+    <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M12 3v18M6 9l6-6 6 6"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  diag1: (
+    <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M4 4l16 16M10 20h10V10"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  diag2: (
+    <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M20 4L4 20M14 20H4V10"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
 };
 
-/* Role visuals */
-const ROLE_META: Record<
-  Role,
-  { label: string; badgeBg: string; badgeText: string; outline: string }
-> = {
-  none: {
-    label: "None",
-    badgeBg: "bg-gray-700",
-    badgeText: "text-white",
-    outline: "2px solid rgba(31,41,55,0.9)",
-  },
-  draggable: {
-    label: "Draggable",
-    badgeBg: "bg-blue-700",
-    badgeText: "text-white",
-    outline: "2px dashed rgba(29,78,216,0.9)", // blue
-  },
-  target: {
-    label: "Target",
-    badgeBg: "bg-emerald-700",
-    badgeText: "text-white",
-    outline: "2px dashed rgba(5,150,105,0.9)", // green
-  },
-  tappable: {
-    label: "Tappable",
-    badgeBg: "bg-fuchsia-700",
-    badgeText: "text-white",
-    outline: "2px dashed rgba(162,28,175,0.9)", // fuchsia
-  },
-};
+const SELECTED_OUTLINE = "2px dashed rgba(99,102,241,0.9)"; // indigo-500
 
-export default function SvgCopyPage() {
+export default function SlidersPage() {
   const canvasRef = useRef<HTMLDivElement>(null);
 
   const [items, setItems] = useState<Item[]>([]);
@@ -300,13 +293,8 @@ export default function SvgCopyPage() {
   // canvas background color
   const [canvasBg, setCanvasBg] = useState<string>("#ffffff");
 
-  // info dialog + preview dialog
+  // info dialog
   const [showInfo, setShowInfo] = useState(false);
-  const [previewDialog, setPreviewDialog] = useState<{
-    open: boolean;
-    title: string;
-    message?: string;
-  }>({ open: false, title: "", message: "" });
 
   // preview mode
   const [previewMode, setPreviewMode] = useState(false);
@@ -326,6 +314,9 @@ export default function SvgCopyPage() {
     w: 0,
     h: 0,
   });
+
+  // Preview slider value (0..100)
+  const [previewRange, setPreviewRange] = useState<number>(50);
 
   /* ===== Undo stack ===== */
   const undoStackRef = useRef<Snapshot[]>([]);
@@ -349,18 +340,15 @@ export default function SvgCopyPage() {
     setCanvasBg(prev.canvasBg);
   }, []);
 
-  /* ===== Gesture state ===== */
+  /* ===== Gesture state (Edit mode only) ===== */
   const isDraggingRef = useRef(false);
   const dragOffsetRef = useRef<{ dx: number; dy: number } | null>(null);
-  const dragActiveIdRef = useRef<string | null>(null);
-
   const isResizingRef = useRef(false);
   const resizeStartRef = useRef<{
     cxPx: number;
     wPct: number;
     pointerX: number;
   } | null>(null);
-
   const isRotatingRef = useRef(false);
   const rotateStartRef = useRef<{
     cxPx: number;
@@ -368,7 +356,7 @@ export default function SvgCopyPage() {
     startAngle: number;
     initialRot: number;
   } | null>(null);
-
+  const dragActiveIdRef = useRef<string | null>(null);
   const gestureSnapSavedRef = useRef(false);
 
   const selectedIndex = useMemo(
@@ -379,18 +367,6 @@ export default function SvgCopyPage() {
     () => (selectedId ? items.find((i) => i.id === selectedId) ?? null : null),
     [items, selectedId]
   );
-
-  const targetItems = useMemo(
-    () => items.filter((i) => i.role === "target"),
-    [items]
-  );
-
-  // Map of targetId -> 1-based number
-  const targetIndexMap = useMemo(() => {
-    const m: Record<string, number> = {};
-    targetItems.forEach((t, i) => (m[t.id] = i + 1));
-    return m;
-  }, [targetItems]);
 
   /* ===== Responsive canvas size ===== */
   useEffect(() => {
@@ -435,12 +411,11 @@ export default function SvgCopyPage() {
     };
   }, [items, selectedId, canvasSize]);
 
-  /* ===== Helpers: add new items ===== */
+  /* ===== Add items ===== */
   const addSvgItems = useCallback(
     (svgs: string[]) => {
       if (svgs.length === 0) return;
       pushSnapshot();
-
       const newItems: Item[] = svgs.map((svg, idx) => ({
         id: uid(),
         kind: "svg",
@@ -449,9 +424,10 @@ export default function SvgCopyPage() {
         cyPct: 0.5 + (idx * 16) / Math.max(1, canvasSize.h),
         wPct: 0.5,
         rot: 0,
-        role: "none",
+        moveable: false,
+        resizeable: true,
+        moveDir: "horizontal",
       }));
-
       setItems((prev) => [...prev, ...newItems]);
       setSelectedId(newItems[newItems.length - 1].id);
     },
@@ -462,7 +438,6 @@ export default function SvgCopyPage() {
     (srcs: string[]) => {
       if (srcs.length === 0) return;
       pushSnapshot();
-
       const newItems: Item[] = srcs.map((src, idx) => ({
         id: uid(),
         kind: "image",
@@ -471,9 +446,10 @@ export default function SvgCopyPage() {
         cyPct: 0.5 + (idx * 16) / Math.max(1, canvasSize.h),
         wPct: 0.5,
         rot: 0,
-        role: "none",
+        moveable: false,
+        resizeable: true,
+        moveDir: "horizontal",
       }));
-
       setItems((prev) => [...prev, ...newItems]);
       setSelectedId(newItems[newItems.length - 1].id);
     },
@@ -491,7 +467,6 @@ export default function SvgCopyPage() {
       else if (flavor === "text/html") svgs = extractFromHtml(payload);
       else svgs = extractFromPlain(payload);
 
-      // Namespace ids to avoid Chrome duplicate-id blank bug
       const nssvgs = svgs.map((s) => namespaceSvgIds(s, uid()));
       if (nssvgs.length) addSvgItems(nssvgs);
     },
@@ -502,8 +477,6 @@ export default function SvgCopyPage() {
   useEffect(() => {
     const onPaste = async (e: ClipboardEvent) => {
       if (!e.clipboardData) return;
-
-      // If focus is in an input/textarea/contenteditable, let the browser handle paste.
       const ae = document.activeElement as HTMLElement | null;
       if (
         ae &&
@@ -516,7 +489,6 @@ export default function SvgCopyPage() {
 
       const itemsArr = Array.from(e.clipboardData.items || []);
 
-      // 1) Image blobs first (png/jpeg/webp)
       const imageMimes = ["image/png", "image/jpeg", "image/webp"];
       const imageSrcs: string[] = [];
       for (const it of itemsArr) {
@@ -534,7 +506,6 @@ export default function SvgCopyPage() {
         return;
       }
 
-      // 2) SVG / HTML / Plain
       const readItemsByType = async (mime: string): Promise<string | null> => {
         for (const it of itemsArr) {
           if (it.type === mime) {
@@ -573,7 +544,7 @@ export default function SvgCopyPage() {
     return () => window.removeEventListener("paste", onPaste);
   }, [applyPastedPayload, addImageItems]);
 
-  /* ===== Mobile-friendly paste button (supports images) ===== */
+  /* ===== Mobile-friendly paste button ===== */
   const pasteFromClipboard = useCallback(async () => {
     try {
       const nav = navigator as Navigator & {
@@ -586,7 +557,6 @@ export default function SvgCopyPage() {
       if (nav.clipboard?.read) {
         const items = await nav.clipboard.read();
 
-        // Prioritize image types
         const imageSrcs: string[] = [];
         for (const ci of items) {
           const mime = ci.types.find((t) =>
@@ -602,7 +572,6 @@ export default function SvgCopyPage() {
           return;
         }
 
-        // Then SVG
         for (const ci of items) {
           if (ci.types?.includes("image/svg+xml")) {
             const blob = await ci.getType("image/svg+xml");
@@ -646,10 +615,9 @@ export default function SvgCopyPage() {
     }
   }, [applyPastedPayload, addImageItems]);
 
-  /* ===== Keyboard: Undo / Delete / Duplicate (safe in inputs) ===== */
+  /* ===== Keyboard: Undo / Delete / Duplicate ===== */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // If focused in an editor input, ignore delete/backspace/duplicate/undo so we don't affect canvas.
       const ae = document.activeElement as HTMLElement | null;
       const inEditor =
         ae &&
@@ -691,7 +659,7 @@ export default function SvgCopyPage() {
         (e.key === "Delete" || e.key === "Backspace") &&
         selectedId
       ) {
-        if (inEditor) return; // <-- prevent deleting selected item while typing in input
+        if (inEditor) return;
         e.preventDefault();
         pushSnapshot();
         setItems((prev) => prev.filter((it) => it.id !== selectedId));
@@ -759,7 +727,7 @@ export default function SvgCopyPage() {
     });
   }, [selectedIndex, pushSnapshot, previewMode]);
 
-  /* ===== Canvas / Items pointer handlers ===== */
+  /* ===== Canvas / Items pointer handlers (Edit mode only) ===== */
   const onCanvasPointerDown = () => {
     if (previewMode) return;
     setSelectedId(null);
@@ -770,34 +738,19 @@ export default function SvgCopyPage() {
     id: string
   ) => {
     e.stopPropagation();
+    if (previewMode) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const target = e.target as HTMLElement;
-
-    // Preview: only drag draggable; tappable handled onClick
-    if (previewMode) {
-      const item = items.find((it) => it.id === id);
-      if (!item || item.role !== "draggable") return;
-
-      const rect = canvas.getBoundingClientRect();
-      const pointerX = e.clientX - rect.left;
-      const pointerY = e.clientY - rect.top;
-
-      const cxPx = item.cxPct * rect.width;
-      const cyPx = item.cyPct * rect.height;
-
-      isDraggingRef.current = true;
-      dragActiveIdRef.current = id;
-      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-      dragOffsetRef.current = { dx: pointerX - cxPx, dy: pointerY - cyPx };
-      return;
-    }
+    const item = items.find((it) => it.id === id);
+    if (!item) return;
 
     const isRotateHit = !!target.closest('[data-handle="rotate"]');
     const isResizeHit = !!target.closest('[data-handle="resize"]');
 
-    // RESIZE
+    // RESIZE (always allowed in Edit)
     if (isResizeHit) {
       if (selectedId !== id) {
         setSelectedId(id);
@@ -805,8 +758,6 @@ export default function SvgCopyPage() {
       }
       const rect = canvas.getBoundingClientRect();
       const pointerX = e.clientX - rect.left;
-      const item = items.find((it) => it.id === id);
-      if (!item) return;
 
       if (!gestureSnapSavedRef.current) {
         pushSnapshot();
@@ -823,15 +774,13 @@ export default function SvgCopyPage() {
       return;
     }
 
-    // ROTATE
+    // ROTATE (always allowed in Edit)
     if (isRotateHit) {
       if (selectedId !== id) {
         setSelectedId(id);
         return;
       }
       const rect = canvas.getBoundingClientRect();
-      const item = items.find((it) => it.id === id);
-      if (!item) return;
 
       const pointerX = e.clientX - rect.left;
       const pointerY = e.clientY - rect.top;
@@ -857,19 +806,15 @@ export default function SvgCopyPage() {
       return;
     }
 
-    // SELECT or DRAG (edit mode)
+    // SELECT or DRAG (Edit)
     if (selectedId !== id) {
       setSelectedId(id);
       return;
     }
 
-    // Begin DRAG (edit mode)
     const rect = canvas.getBoundingClientRect();
     const pointerX = e.clientX - rect.left;
     const pointerY = e.clientY - rect.top;
-
-    const item = items.find((it) => it.id === id);
-    if (!item) return;
 
     if (!gestureSnapSavedRef.current) {
       pushSnapshot();
@@ -889,13 +834,16 @@ export default function SvgCopyPage() {
     e: React.PointerEvent<HTMLDivElement>,
     id: string
   ) => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || previewMode) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const pointerX = e.clientX - rect.left;
     const pointerY = e.clientY - rect.top;
 
-    // RESIZE (edit only)
-    if (!previewMode && isResizingRef.current && resizeStartRef.current) {
+    const item = items.find((it) => it.id === id);
+    if (!item) return;
+
+    // RESIZE
+    if (isResizingRef.current && resizeStartRef.current) {
       const start = resizeStartRef.current;
       let targetWidthPx = Math.abs(pointerX - start.cxPx) * 2;
       const minPx = rect.width * 0.05;
@@ -909,8 +857,8 @@ export default function SvgCopyPage() {
       return;
     }
 
-    // ROTATE (edit only)
-    if (!previewMode && isRotatingRef.current && rotateStartRef.current) {
+    // ROTATE
+    if (isRotatingRef.current && rotateStartRef.current) {
       const st = rotateStartRef.current;
       const dx = pointerX - st.cxPx;
       const dy = pointerY - st.cyPx;
@@ -928,7 +876,7 @@ export default function SvgCopyPage() {
       return;
     }
 
-    // DRAG (both modes)
+    // DRAG
     if (isDraggingRef.current && dragOffsetRef.current) {
       const off = dragOffsetRef.current;
       const cxPx = pointerX - off.dx;
@@ -944,43 +892,7 @@ export default function SvgCopyPage() {
     }
   };
 
-  // Drop correctness (draggable -> its correctTargetId)
-  const checkCorrectDrop = useCallback(
-    (dragId: string) => {
-      const dragItem = items.find((i) => i.id === dragId);
-      if (
-        !dragItem ||
-        dragItem.role !== "draggable" ||
-        !dragItem.correctTargetId
-      )
-        return false;
-
-      const canvas = canvasRef.current;
-      const dragHost = hostRefs.current[dragItem.id];
-      const targetHost = hostRefs.current[dragItem.correctTargetId];
-      if (!canvas || !dragHost || !targetHost) return false;
-
-      const dragRect = dragHost.getBoundingClientRect();
-      const targetRect = targetHost.getBoundingClientRect();
-
-      // Use draggable center
-      const cx = dragRect.left + dragRect.width / 2;
-      const cy = dragRect.top + dragRect.height / 2;
-
-      const inside =
-        cx >= targetRect.left &&
-        cx <= targetRect.right &&
-        cy >= targetRect.top &&
-        cy <= targetRect.bottom;
-
-      return inside;
-    },
-    [items]
-  );
-
   const endGesture = (e: React.PointerEvent<HTMLDivElement>) => {
-    const activeId = dragActiveIdRef.current;
-
     isDraggingRef.current = false;
     dragOffsetRef.current = null;
     isResizingRef.current = false;
@@ -990,16 +902,6 @@ export default function SvgCopyPage() {
     dragActiveIdRef.current = null;
     (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
     gestureSnapSavedRef.current = false;
-
-    if (previewMode && activeId) {
-      if (checkCorrectDrop(activeId)) {
-        setPreviewDialog({
-          open: true,
-          title: "Correct!",
-          message: "You dropped the item on its correct target.",
-        });
-      }
-    }
   };
 
   /* ===== Toolbar helpers ===== */
@@ -1025,73 +927,94 @@ export default function SvgCopyPage() {
     setSelectedId(dupe.id);
   };
 
-  const onChangeRole = (role: Role) => {
-    if (previewMode || !selectedId) return;
+  /** Enforce mutual exclusivity: moveable XOR resizeable */
+  const setMoveable = (v: boolean) => {
+    if (!selectedId) return;
     pushSnapshot();
     setItems((prev) =>
       prev.map((it) =>
         it.id === selectedId
-          ? {
-              ...it,
-              role,
-              // clear role-specific data when switching roles
-              correctTargetId:
-                role === "draggable" ? it.correctTargetId : undefined,
-              tapMessage: role === "tappable" ? it.tapMessage : undefined,
-            }
+          ? { ...it, moveable: v, resizeable: v ? false : it.resizeable }
           : it
       )
     );
   };
-
-  const onSetCorrectTarget = (targetId: string | "") => {
-    if (previewMode || !selectedId) return;
+  const setResizeable = (v: boolean) => {
+    if (!selectedId) return;
     pushSnapshot();
     setItems((prev) =>
       prev.map((it) =>
         it.id === selectedId
-          ? { ...it, correctTargetId: targetId || undefined }
+          ? { ...it, resizeable: v, moveable: v ? false : it.moveable }
           : it
       )
     );
   };
-
-  const onSetTapMessage = (msg: string) => {
-    if (previewMode || !selectedId) return;
+  const setMoveDir = (dir: MoveDir) => {
+    if (!selectedId) return;
     setItems((prev) =>
-      prev.map((it) => (it.id === selectedId ? { ...it, tapMessage: msg } : it))
+      prev.map((it) => (it.id === selectedId ? { ...it, moveDir: dir } : it))
     );
-  };
-
-  // Tappable action (preview): show message dialog
-  const onTappableClick = (id: string) => {
-    if (!previewMode) return;
-    const item = items.find((i) => i.id === id);
-    if (!item || item.role !== "tappable") return;
-    setPreviewDialog({
-      open: true,
-      title: "Message",
-      message: item.tapMessage || "No message set.",
-    });
   };
 
   /* ===== Derived values ===== */
   const sel = selectedItem;
   const rotDeg = sel ? Math.round(((sel.rot * 180) / Math.PI) * 10) / 10 : 0;
 
-  // Filter by layer toggle: hide all z != 0 when enabled
   const visibleItems = useMemo(() => {
     if (!hideNonZeroZ) return items;
     return items.filter((_, idx) => idx === 0);
   }, [items, hideNonZeroZ]);
 
-  // If selection becomes hidden by layer toggle, clear selection
   useEffect(() => {
     if (!selectedId) return;
     const idx = items.findIndex((i) => i.id === selectedId);
     if (idx < 0) return;
     if (hideNonZeroZ && idx !== 0) setSelectedId(null);
   }, [hideNonZeroZ, items, selectedId]);
+
+  /* ===== Preview application (non-destructive) ===== */
+  const t = previewRange / 100; // 0..1
+  function getPreviewFrame(it: Item) {
+    // defaults
+    let cx = it.cxPct;
+    let cy = it.cyPct;
+    let w = it.wPct;
+
+    if (previewMode && selectedId === it.id) {
+      // Resizeable: scale around center (0.2x .. 2.0x)
+      if (it.resizeable) {
+        const scale = 0.2 + 1.8 * t; // 0.2→2.0
+        w = Math.max(0.02, Math.min(2.0, it.wPct * scale));
+      }
+      // Moveable: move along direction, stay inside canvas using margins
+      else if (it.moveable) {
+        const margin = Math.min(0.5, Math.max(0.02, it.wPct * 0.5)); // half width as margin
+        const min = margin;
+        const max = 1 - margin;
+
+        switch (it.moveDir) {
+          case "horizontal":
+            cx = min + (max - min) * t;
+            // keep cy fixed
+            break;
+          case "vertical":
+            // keep cx fixed
+            cy = min + (max - min) * t;
+            break;
+          case "diag1": // left-top -> bottom-right
+            cx = min + (max - min) * t;
+            cy = min + (max - min) * t;
+            break;
+          case "diag2": // right-top -> left-bottom
+            cx = max - (max - min) * t;
+            cy = min + (max - min) * t;
+            break;
+        }
+      }
+    }
+    return { cx, cy, w };
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-800 font-mono">
@@ -1248,7 +1171,9 @@ export default function SvgCopyPage() {
                 ? "bg-emerald-600 text-white"
                 : "bg-white text-gray-700 hover:bg-gray-100 active:bg-gray-200"
             }`}
-            onClick={() => setPreviewMode((p) => !p)}
+            onClick={() =>
+              setPreviewMode((p) => (p ? (setPreviewRange(50), false) : true))
+            }
             title={previewMode ? "Exit Preview" : "Enter Preview"}
           >
             {previewMode ? I.stop : I.play}
@@ -1268,62 +1193,80 @@ export default function SvgCopyPage() {
           </button>
         </div>
 
-        {/* Role selector + controls (edit mode only) */}
+        {/* Item tagging (Edit mode only) */}
         {!previewMode && selectedItem && (
-          <div className="mb-2 space-y-2">
-            <div className="flex items-center justify-center gap-1 text-xs">
-              {(["none", "draggable", "target", "tappable"] as Role[]).map(
-                (r) => (
-                  <button
-                    key={r}
-                    onClick={() => onChangeRole(r)}
-                    className={`px-2 py-1 rounded border ${
-                      selectedItem.role === r
-                        ? "border-gray-900 bg-gray-900 text-white"
-                        : "border-gray-300 bg-white text-gray-700 hover:bg-gray-100"
-                    }`}
-                    title={`Set role: ${ROLE_META[r].label}`}
-                  >
-                    {ROLE_META[r].label}
-                  </button>
-                )
-              )}
-            </div>
+          <div className="mb-2 flex items-center justify-center gap-3 text-xs">
+            <label className="inline-flex items-center gap-1">
+              <input
+                type="checkbox"
+                className="accent-gray-800"
+                checked={!!selectedItem.moveable}
+                onChange={(e) => setMoveable(e.target.checked)}
+              />
+              <span className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-800">
+                Moveable
+              </span>
+            </label>
+            <label className="inline-flex items-center gap-1">
+              <input
+                type="checkbox"
+                className="accent-gray-800"
+                checked={!!selectedItem.resizeable}
+                onChange={(e) => setResizeable(e.target.checked)}
+              />
+              <span className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-800">
+                Resizeable
+              </span>
+            </label>
 
-            {/* Draggable -> choose correct target */}
-            {selectedItem.role === "draggable" && (
-              <div className="flex items-center justify-center gap-2 text-xs">
-                <label className="text-gray-600">Correct Target:</label>
-                <select
-                  className="border border-gray-300 rounded px-2 py-1 bg-white text-gray-800"
-                  value={selectedItem.correctTargetId ?? ""}
-                  onChange={(e) => onSetCorrectTarget(e.target.value)}
+            {/* Direction (only if moveable) */}
+            {selectedItem.moveable && (
+              <div className="inline-flex items-center gap-1">
+                <span className="text-gray-600 mr-1">Direction:</span>
+                <button
+                  className={`px-1.5 py-0.5 rounded border text-xs ${
+                    selectedItem.moveDir === "horizontal"
+                      ? "border-gray-900 bg-gray-900 text-white"
+                      : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                  onClick={() => setMoveDir("horizontal")}
+                  title="Horizontal"
                 >
-                  <option value="">— none —</option>
-                  {targetItems.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {`Target #${targetIndexMap[t.id] || "?"}`}
-                    </option>
-                  ))}
-                </select>
-                {targetItems.length === 0 && (
-                  <span className="text-[10px] text-gray-500">
-                    (No targets yet. Set some items to “Target”.)
-                  </span>
-                )}
-              </div>
-            )}
-
-            {/* Tappable -> set message */}
-            {selectedItem.role === "tappable" && (
-              <div className="flex items-center justify-center gap-2 text-xs">
-                <label className="text-gray-600">Message:</label>
-                <input
-                  className="border border-gray-300 rounded px-2 py-1 bg-white text-gray-800 w-full"
-                  placeholder="Type a message to show on tap"
-                  value={selectedItem.tapMessage ?? ""}
-                  onChange={(e) => onSetTapMessage(e.target.value)}
-                />
+                  {I.horiz}
+                </button>
+                <button
+                  className={`px-1.5 py-0.5 rounded border text-xs ${
+                    selectedItem.moveDir === "vertical"
+                      ? "border-gray-900 bg-gray-900 text-white"
+                      : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                  onClick={() => setMoveDir("vertical")}
+                  title="Vertical"
+                >
+                  {I.vert}
+                </button>
+                <button
+                  className={`px-1.5 py-0.5 rounded border text-xs ${
+                    selectedItem.moveDir === "diag1"
+                      ? "border-gray-900 bg-gray-900 text-white"
+                      : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                  onClick={() => setMoveDir("diag1")}
+                  title="Diagonal ↘︎"
+                >
+                  {I.diag1}
+                </button>
+                <button
+                  className={`px-1.5 py-0.5 rounded border text-xs ${
+                    selectedItem.moveDir === "diag2"
+                      ? "border-gray-900 bg-gray-900 text-white"
+                      : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                  onClick={() => setMoveDir("diag2")}
+                  title="Diagonal ↙︎"
+                >
+                  {I.diag2}
+                </button>
               </div>
             )}
           </div>
@@ -1365,61 +1308,65 @@ export default function SvgCopyPage() {
 
           {visibleItems.map((it) => {
             const isSelected = !previewMode && it.id === selectedId;
-            const roleMeta = ROLE_META[it.role];
-            const isTarget = it.role === "target";
-            const isDraggable = it.role === "draggable";
-            const isTappable = it.role === "tappable";
 
-            const handleClick =
-              previewMode && isTappable
-                ? () => onTappableClick(it.id)
-                : undefined;
-
-            // Badge text: include numbering for targets
-            const badgeText =
-              isTarget && targetIndexMap[it.id]
-                ? `Target #${targetIndexMap[it.id]}`
-                : roleMeta.label;
+            // Apply preview transforms non-destructively
+            const frame = getPreviewFrame(it);
 
             return (
               <div
                 key={it.id}
                 className="absolute z-10"
                 style={{
-                  left: `${it.cxPct * 100}%`,
-                  top: `${it.cyPct * 100}%`,
-                  width: `${it.wPct * 100}%`,
+                  left: `${frame.cx * 100}%`,
+                  top: `${frame.cy * 100}%`,
+                  width: `${frame.w * 100}%`,
                   transform: "translate(-50%, -50%)",
                   cursor: previewMode
-                    ? isDraggable
-                      ? "grab"
-                      : isTappable
-                      ? "pointer"
-                      : "default"
+                    ? "default"
                     : isSelected
                     ? "grabbing"
                     : "grab",
-                  outline: isSelected
-                    ? roleMeta.outline
-                    : previewMode && isTarget
-                    ? "2px dashed rgba(16,185,129,0.6)"
-                    : "none",
+                  outline: isSelected ? SELECTED_OUTLINE : "none",
                   outlineOffset: 2,
                 }}
                 onPointerDown={(e) => onItemPointerDown(e, it.id)}
                 onPointerMove={(e) => onItemPointerMove(e, it.id)}
                 onPointerUp={endGesture}
                 onPointerCancel={endGesture}
-                onClick={handleClick}
               >
-                {/* Role badge */}
-                <div
-                  className={`absolute -top-2 -left-2 px-1.5 py-0.5 rounded text-[10px] ${roleMeta.badgeBg} ${roleMeta.badgeText} shadow`}
-                >
-                  {badgeText}
+                {/* Tag markers */}
+                <div className="absolute -top-2 -left-2 flex gap-1">
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] shadow ${
+                      it.moveable
+                        ? "bg-gray-900 text-white"
+                        : "bg-gray-300 text-gray-700"
+                    }`}
+                    title={
+                      it.moveable
+                        ? "Moveable (Preview slider moves it)"
+                        : "Not moveable"
+                    }
+                  >
+                    M
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] shadow ${
+                      it.resizeable
+                        ? "bg-gray-900 text-white"
+                        : "bg-gray-300 text-gray-700"
+                    }`}
+                    title={
+                      it.resizeable
+                        ? "Resizeable (Preview slider scales it)"
+                        : "Not resizeable"
+                    }
+                  >
+                    R
+                  </span>
                 </div>
 
-                {/* Rotated content host (measure this) */}
+                {/* Rotated content host */}
                 <div
                   ref={(el) => {
                     hostRefs.current[it.id] = el;
@@ -1428,7 +1375,7 @@ export default function SvgCopyPage() {
                   style={{
                     transform: `rotate(${it.rot}rad)`,
                     transformOrigin: "center center",
-                    pointerEvents: "none", // let wrapper handle pointers
+                    pointerEvents: "none",
                   }}
                 >
                   {it.kind === "svg" ? (
@@ -1443,7 +1390,7 @@ export default function SvgCopyPage() {
                   )}
                 </div>
 
-                {/* Rotate handle (edit only) */}
+                {/* Rotate handle (Edit only) */}
                 {!previewMode && isSelected && (
                   <div
                     data-handle="rotate"
@@ -1461,7 +1408,7 @@ export default function SvgCopyPage() {
                   </div>
                 )}
 
-                {/* Resize handle (edit only) */}
+                {/* Resize handle (Edit only) */}
                 {!previewMode && isSelected && (
                   <div
                     data-handle="resize"
@@ -1494,25 +1441,33 @@ export default function SvgCopyPage() {
                   Ctrl
                 </span>
                 +<span className="px-1 border border-gray-300 rounded">V</span>.
-                Select → drag. Resize corner. Rotate top knob. Duplicate:
-                <span className="px-1 border border-gray-300 rounded">
-                  Cmd/Ctrl+D
-                </span>
-                . Undo:
-                <span className="px-1 border border-gray-300 rounded">
-                  Cmd/Ctrl+Z
-                </span>
-                . Preview:
-                <span className="px-1 border border-gray-300 rounded ml-1">
-                  ▶︎
-                </span>
-                . Layers:
-                <span className="px-1 border border-gray-300 rounded ml-1">
-                  ⧉
-                </span>
+                Edit mode: drag / corner-resize / rotate. Preview: use the
+                slider below to move (M) or resize (R).
               </div>
             </div>
           )}
+        </div>
+
+        {/* Preview slider (always rendered just below canvas) */}
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={previewRange}
+            onChange={(e) => setPreviewRange(Number(e.target.value))}
+            className="w-full accent-gray-800"
+            disabled={
+              !previewMode ||
+              !selectedItem ||
+              !(selectedItem.moveable || selectedItem.resizeable)
+            }
+            title="Controls movement (if Moveable) or size (if Resizeable) of the selected item in Preview"
+          />
+          <span className="w-10 text-right text-xs text-gray-600">
+            {previewRange}
+          </span>
         </div>
 
         {/* Info Dialog */}
@@ -1587,46 +1542,30 @@ export default function SvgCopyPage() {
                       <div className="text-right">{selectedIndex}</div>
                       <div>Rotation</div>
                       <div className="text-right">{rotDeg}°</div>
-                      <div>Role</div>
+                      <div>Moveable</div>
                       <div className="text-right">
-                        {selectedItem
-                          ? ROLE_META[selectedItem.role].label
-                          : "-"}
+                        {selectedItem?.moveable ? "Yes" : "No"}
                       </div>
-                      {selectedItem?.role === "target" && (
+                      <div>Resizeable</div>
+                      <div className="text-right">
+                        {selectedItem?.resizeable ? "Yes" : "No"}
+                      </div>
+                      {selectedItem?.moveable && (
                         <>
-                          <div>Target No.</div>
+                          <div>Direction</div>
                           <div className="text-right">
-                            {selectedItem.id in targetIndexMap
-                              ? targetIndexMap[selectedItem.id]
-                              : "—"}
+                            {selectedItem.moveDir === "horizontal"
+                              ? "Horizontal"
+                              : selectedItem.moveDir === "vertical"
+                              ? "Vertical"
+                              : selectedItem.moveDir === "diag1"
+                              ? "Diagonal ↘︎"
+                              : "Diagonal ↙︎"}
                           </div>
                         </>
                       )}
-                      {selectedItem?.role === "draggable" && (
-                        <>
-                          <div>Correct Target</div>
-                          <div className="text-right">
-                            {selectedItem.correctTargetId
-                              ? `#${
-                                  targetIndexMap[
-                                    selectedItem.correctTargetId
-                                  ] ?? "?"
-                                }`
-                              : "—"}
-                          </div>
-                        </>
-                      )}
-                      {selectedItem?.role === "tappable" && (
-                        <>
-                          <div>Message</div>
-                          <div className="text-right">
-                            {selectedItem.tapMessage
-                              ? selectedItem.tapMessage
-                              : "—"}
-                          </div>
-                        </>
-                      )}
+                      <div>Preview Slider</div>
+                      <div className="text-right">{previewRange}</div>
                     </div>
                   ) : (
                     <div className="text-gray-500">None</div>
@@ -1638,42 +1577,6 @@ export default function SvgCopyPage() {
                 <button
                   className="px-2 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-100"
                   onClick={() => setShowInfo(false)}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Preview pop dialog (success / message) */}
-        {previewDialog.open && (
-          <div
-            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
-            onClick={() =>
-              setPreviewDialog({ open: false, title: "", message: "" })
-            }
-          >
-            <div className="absolute inset-0 bg-black/40" />
-            <div
-              className="relative z-10 w-full sm:max-w-xs bg-white border border-gray-300 rounded-lg shadow-lg m-2 p-3 text-sm text-gray-800"
-              onClick={(e) => e.stopPropagation()}
-              role="dialog"
-              aria-modal="true"
-            >
-              <div className="flex items-center gap-2 font-semibold mb-2">
-                {I.check}
-                <span>{previewDialog.title}</span>
-              </div>
-              {previewDialog.message && (
-                <div className="text-gray-700">{previewDialog.message}</div>
-              )}
-              <div className="mt-3 flex justify-end">
-                <button
-                  className="px-2 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-100"
-                  onClick={() =>
-                    setPreviewDialog({ open: false, title: "", message: "" })
-                  }
                 >
                   Close
                 </button>
