@@ -19,8 +19,8 @@ type Item = {
   wPct: number; // width as fraction of canvas width [0..1]
   rot: number; // radians
 
-  moveable: boolean; // mutually exclusive with resizeable
-  resizeable: boolean; // mutually exclusive with moveable
+  moveable: boolean; // XOR with resizeable
+  resizeable: boolean; // XOR with moveable
   moveDir: MoveDir; // used only if moveable
 };
 
@@ -425,7 +425,7 @@ export default function SlidersPage() {
         wPct: 0.5,
         rot: 0,
         moveable: false,
-        resizeable: true,
+        resizeable: true, // sensible default
         moveDir: "horizontal",
       }));
       setItems((prev) => [...prev, ...newItems]);
@@ -456,7 +456,7 @@ export default function SlidersPage() {
     [pushSnapshot, canvasSize.w, canvasSize.h]
   );
 
-  /* ===== Apply pasted payloads ===== */
+  /* ===== Paste pipeline ===== */
   const applyPastedPayload = useCallback(
     async (
       payload: string,
@@ -473,7 +473,6 @@ export default function SlidersPage() {
     [addSvgItems]
   );
 
-  /* ===== Paste (keyboard) - also supports image blobs ===== */
   useEffect(() => {
     const onPaste = async (e: ClipboardEvent) => {
       if (!e.clipboardData) return;
@@ -489,6 +488,7 @@ export default function SlidersPage() {
 
       const itemsArr = Array.from(e.clipboardData.items || []);
 
+      // Image blobs
       const imageMimes = ["image/png", "image/jpeg", "image/webp"];
       const imageSrcs: string[] = [];
       for (const it of itemsArr) {
@@ -506,6 +506,7 @@ export default function SlidersPage() {
         return;
       }
 
+      // Text flavors
       const readItemsByType = async (mime: string): Promise<string | null> => {
         for (const it of itemsArr) {
           if (it.type === mime) {
@@ -544,7 +545,6 @@ export default function SlidersPage() {
     return () => window.removeEventListener("paste", onPaste);
   }, [applyPastedPayload, addImageItems]);
 
-  /* ===== Mobile-friendly paste button ===== */
   const pasteFromClipboard = useCallback(async () => {
     try {
       const nav = navigator as Navigator & {
@@ -904,7 +904,7 @@ export default function SlidersPage() {
     gestureSnapSavedRef.current = false;
   };
 
-  /* ===== Toolbar helpers ===== */
+  /* ===== Tag helpers (mutually exclusive) ===== */
   const onDelete = () => {
     if (previewMode || !selectedId) return;
     pushSnapshot();
@@ -927,7 +927,6 @@ export default function SlidersPage() {
     setSelectedId(dupe.id);
   };
 
-  /** Enforce mutual exclusivity: moveable XOR resizeable */
   const setMoveable = (v: boolean) => {
     if (!selectedId) return;
     pushSnapshot();
@@ -973,33 +972,33 @@ export default function SlidersPage() {
     if (hideNonZeroZ && idx !== 0) setSelectedId(null);
   }, [hideNonZeroZ, items, selectedId]);
 
-  /* ===== Preview application (non-destructive) ===== */
+  const totalMoveable = items.filter((i) => i.moveable).length;
+  const totalResizeable = items.filter((i) => i.resizeable).length;
+
+  /* ===== Preview application (non-destructive; affects ALL tagged items) ===== */
   const t = previewRange / 100; // 0..1
   function getPreviewFrame(it: Item) {
-    // defaults
+    // base values
     let cx = it.cxPct;
     let cy = it.cyPct;
     let w = it.wPct;
 
-    if (previewMode && selectedId === it.id) {
-      // Resizeable: scale around center (0.2x .. 2.0x)
+    if (previewMode) {
       if (it.resizeable) {
+        // scale around center (0.2x .. 2.0x)
         const scale = 0.2 + 1.8 * t; // 0.2→2.0
         w = Math.max(0.02, Math.min(2.0, it.wPct * scale));
-      }
-      // Moveable: move along direction, stay inside canvas using margins
-      else if (it.moveable) {
-        const margin = Math.min(0.5, Math.max(0.02, it.wPct * 0.5)); // half width as margin
+      } else if (it.moveable) {
+        // move along direction; stay inside canvas using per-item margin
+        const margin = Math.min(0.5, Math.max(0.02, it.wPct * 0.5));
         const min = margin;
         const max = 1 - margin;
 
         switch (it.moveDir) {
           case "horizontal":
             cx = min + (max - min) * t;
-            // keep cy fixed
             break;
           case "vertical":
-            // keep cx fixed
             cy = min + (max - min) * t;
             break;
           case "diag1": // left-top -> bottom-right
@@ -1309,7 +1308,7 @@ export default function SlidersPage() {
           {visibleItems.map((it) => {
             const isSelected = !previewMode && it.id === selectedId;
 
-            // Apply preview transforms non-destructively
+            // Apply preview transforms non-destructively (affects ALL tagged items)
             const frame = getPreviewFrame(it);
 
             return (
@@ -1441,14 +1440,15 @@ export default function SlidersPage() {
                   Ctrl
                 </span>
                 +<span className="px-1 border border-gray-300 rounded">V</span>.
-                Edit mode: drag / corner-resize / rotate. Preview: use the
-                slider below to move (M) or resize (R).
+                Edit mode: drag / corner-resize / rotate. Tag items as <b>M</b>{" "}
+                or <b>R</b>. In Preview, the slider moves all <b>M</b> items and
+                resizes all <b>R</b> items at once.
               </div>
             </div>
           )}
         </div>
 
-        {/* Preview slider (always rendered just below canvas) */}
+        {/* Preview slider (enabled whenever Preview is on and there’s at least one item) */}
         <div className="mt-2 flex items-center gap-2">
           <input
             type="range"
@@ -1458,15 +1458,14 @@ export default function SlidersPage() {
             value={previewRange}
             onChange={(e) => setPreviewRange(Number(e.target.value))}
             className="w-full accent-gray-800"
-            disabled={
-              !previewMode ||
-              !selectedItem ||
-              !(selectedItem.moveable || selectedItem.resizeable)
-            }
-            title="Controls movement (if Moveable) or size (if Resizeable) of the selected item in Preview"
+            disabled={!previewMode || items.length === 0}
+            title="In Preview, this moves all Moveable items and resizes all Resizeable items"
           />
-          <span className="w-10 text-right text-xs text-gray-600">
+          <span className="w-20 text-right text-[11px] text-gray-600">
             {previewRange}
+            <span className="ml-2 inline-block px-1 py-0.5 rounded bg-gray-200 text-gray-700">
+              M:{totalMoveable} · R:{totalResizeable}
+            </span>
           </span>
         </div>
 
@@ -1517,10 +1516,12 @@ export default function SlidersPage() {
                     <div className="text-right">
                       {previewMode ? "Preview" : "Edit"}
                     </div>
-                    <div>Layers</div>
+                    <div>Tagged (M / R)</div>
                     <div className="text-right">
-                      {hideNonZeroZ ? "Only Z=0 visible" : "All visible"}
+                      {totalMoveable} / {totalResizeable}
                     </div>
+                    <div>Slider</div>
+                    <div className="text-right">{previewRange}</div>
                   </div>
                 </div>
 
@@ -1564,8 +1565,6 @@ export default function SlidersPage() {
                           </div>
                         </>
                       )}
-                      <div>Preview Slider</div>
-                      <div className="text-right">{previewRange}</div>
                     </div>
                   ) : (
                     <div className="text-gray-500">None</div>
