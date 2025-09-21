@@ -2,7 +2,7 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DragDropContent,
   DragDropItem,
@@ -61,6 +61,30 @@ function coerceContent(raw: DragDropContent | null): DragDropContent {
   return getDefaultContent("drag-drop");
 }
 
+// Selection type for on-stage editing (for drag state)
+type Selection =
+  | { kind: "item"; id: string; stage: "initial" }
+  | { kind: "item"; id: string; stage: "final" }
+  | { kind: "target"; id: string };
+
+// Discriminated union for selected entity (no any)
+type ItemStage = "initial" | "final";
+type SelectedItem = { type: "item"; value: DragDropItem; stage: ItemStage };
+type SelectedTarget = { type: "target"; value: DragDropTarget };
+type SelectedEntity = SelectedItem | SelectedTarget;
+
+// Drag state
+type DragState = {
+  active: boolean;
+  selection: Selection | null;
+  startClientX: number;
+  startClientY: number;
+  startRelX: number;
+  startRelY: number;
+  startRelW: number;
+  startRelH: number;
+};
+
 export default function DragDropEditor({
   itemId,
   initialContent,
@@ -103,7 +127,6 @@ export default function DragDropEditor({
   const [draftTarget, setDraftTarget] = useState<DragDropTarget>(
     blankDraftTarget()
   );
-
   useEffect(() => {
     setDraftTarget((t) => ({
       ...t,
@@ -180,12 +203,232 @@ export default function DragDropEditor({
   const previewStageClass =
     "bg-white border border-slate-200 relative overflow-hidden";
 
+  // ============================
+  // Dragging / Resizing (no libs)
+  // ============================
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [drag, setDrag] = useState<DragState>({
+    active: false,
+    selection: null,
+    startClientX: 0,
+    startClientY: 0,
+    startRelX: 0,
+    startRelY: 0,
+    startRelW: 0,
+    startRelH: 0,
+  });
+
+  const stageRefInitial = useRef<HTMLDivElement | null>(null);
+  const stageRefFinal = useRef<HTMLDivElement | null>(null);
+
+  const selectedEntity = useMemo<SelectedEntity | null>(() => {
+    if (!selection) return null;
+    if (selection.kind === "target") {
+      const t = content.targets.find((x) => x.id === selection.id);
+      return t ? { type: "target", value: t } : null;
+    }
+    if (selection.kind === "item") {
+      const it = content.items.find((x) => x.id === selection.id);
+      if (!it) return null;
+      return { type: "item", value: it, stage: selection.stage };
+    }
+    return null;
+  }, [selection, content]);
+
+  // Clamp helper in rel coords
+  const clampRelPos = (
+    relX: number,
+    relY: number,
+    relW: number,
+    relH: number
+  ) => {
+    const maxRelX = 1 - relW;
+    const maxRelY = 1 - relH;
+    const x = Math.min(Math.max(relX, 0), Math.max(maxRelX, 0));
+    const y = Math.min(Math.max(relY, 0), Math.max(maxRelY, 0));
+    return { x, y };
+  };
+
+  const beginDrag = (
+    e: React.PointerEvent,
+    s: Selection,
+    startRelX: number,
+    startRelY: number,
+    startRelW: number,
+    startRelH: number
+  ) => {
+    // Prevent native image drag ghost & text selection
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setDrag({
+      active: true,
+      selection: s,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      startRelX,
+      startRelY,
+      startRelW,
+      startRelH,
+    });
+    setSelection(s);
+  };
+
+  const onPointerMove = (e: React.PointerEvent, which: "initial" | "final") => {
+    if (!drag.active || !drag.selection) return;
+
+    const dxPx = e.clientX - drag.startClientX;
+    const dyPx = e.clientY - drag.startClientY;
+
+    const dxRel = pxToRelX(dxPx);
+    const dyRel = pxToRelY(dyPx);
+
+    const newRelX = drag.startRelX + dxRel;
+    const newRelY = drag.startRelY + dyRel;
+
+    const { x: clampedX, y: clampedY } = clampRelPos(
+      newRelX,
+      newRelY,
+      drag.startRelW,
+      drag.startRelH
+    );
+
+    update((prev) => {
+      if (!drag.selection) return prev;
+      const next = structuredClone(prev);
+
+      if (drag.selection.kind === "target") {
+        const i = next.targets.findIndex((t) => t.id === drag.selection!.id);
+        if (i >= 0) {
+          next.targets[i].position.x = clampedX;
+          next.targets[i].position.y = clampedY;
+        }
+      } else if (drag.selection.kind === "item") {
+        const i = next.items.findIndex((it) => it.id === drag.selection!.id);
+        if (i >= 0) {
+          if (which === "initial") {
+            next.items[i].position.initial.x = clampedX;
+            next.items[i].position.initial.y = clampedY;
+          } else {
+            if (!next.items[i].position.final) {
+              next.items[i].position.final = { x: 0, y: 0 };
+            }
+            next.items[i].position.final!.x = clampedX;
+            next.items[i].position.final!.y = clampedY;
+          }
+        }
+      }
+      return next;
+    });
+  };
+
+  const endDrag = (e: React.PointerEvent) => {
+    if (drag.active) {
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+    }
+    setDrag((d) => ({ ...d, active: false, selection: null }));
+  };
+
+  // Deselect when clicking empty space
+  const onStageBackgroundPointerDown = (
+    e: React.PointerEvent,
+    which: "initial" | "final"
+  ) => {
+    if (
+      e.target ===
+      (which === "initial" ? stageRefInitial.current : stageRefFinal.current)
+    ) {
+      setSelection(null);
+    }
+  };
+
+  // ---------- Resizing with ONE slider (width), keep aspect ratio ----------
+  const setSelectedWidthPx = (newWidthPx: number) => {
+    if (!selection) return;
+    update((prev) => {
+      const next = structuredClone(prev);
+
+      if (selection.kind === "target") {
+        const i = next.targets.findIndex((t) => t.id === selection.id);
+        if (i >= 0) {
+          const cur = next.targets[i];
+          const curWpx = Math.max(1, Math.round(relToPxX(cur.size.width)));
+          const curHpx = Math.max(1, Math.round(relToPxY(cur.size.height)));
+          const aspect = curHpx / curWpx;
+
+          const newWRel = pxToRelX(newWidthPx);
+          const newHRel = pxToRelY(Math.round(newWidthPx * aspect));
+
+          const clamped = clampRelPos(
+            cur.position.x,
+            cur.position.y,
+            newWRel,
+            newHRel
+          );
+          cur.position.x = clamped.x;
+          cur.position.y = clamped.y;
+          cur.size.width = newWRel;
+          cur.size.height = newHRel;
+        }
+      } else if (selection.kind === "item") {
+        const i = next.items.findIndex((it) => it.id === selection.id);
+        if (i >= 0) {
+          const cur = next.items[i];
+          const curWpx = Math.max(1, Math.round(relToPxX(cur.size.width)));
+          const curHpx = Math.max(1, Math.round(relToPxY(cur.size.height)));
+          const aspect = curHpx / curWpx;
+
+          const newWRel = pxToRelX(newWidthPx);
+          const newHRel = pxToRelY(Math.round(newWidthPx * aspect));
+
+          // Clamp initial
+          const init = cur.position.initial;
+          const initClamped = clampRelPos(init.x, init.y, newWRel, newHRel);
+          cur.position.initial.x = initClamped.x;
+          cur.position.initial.y = initClamped.y;
+
+          // Clamp final (if present)
+          if (cur.position.final) {
+            const fin = cur.position.final;
+            const finClamped = clampRelPos(fin.x, fin.y, newWRel, newHRel);
+            fin.x = finClamped.x;
+            fin.y = finClamped.y;
+          }
+
+          cur.size.width = newWRel;
+          cur.size.height = newHRel;
+        }
+      }
+
+      return next;
+    });
+  };
+
+  const selectedWidthPx = useMemo(() => {
+    if (!selectedEntity) return 0;
+    return Math.round(relToPxX(selectedEntity.value.size.width));
+  }, [selectedEntity]);
+
+  // Slider bounds (px)
+  const SLIDER_MIN_W = 10;
+  const SLIDER_MAX_W = SCREEN_WIDTH;
+
+  // ============================
+  // Render
+  // ============================
+  const makeSelectableOutline = (isSelected: boolean) =>
+    isSelected ? "outline outline-2 outline-blue-600" : "outline-none";
+
   return (
     <div className="flex flex-col gap-6">
       {/* --------- Preview (Initial / Final) --------- */}
       <div className="flex flex-wrap items-start justify-center gap-4">
-        {/* Initial */}
+        {/* Initial (editable) */}
         <div
+          ref={stageRefInitial}
           className={previewStageClass}
           style={{
             width: SCREEN_WIDTH,
@@ -196,58 +439,106 @@ export default function DragDropEditor({
               : undefined,
             backgroundSize: "cover",
             backgroundPosition: "center",
+            touchAction: "none",
           }}
+          onPointerDown={(e) => onStageBackgroundPointerDown(e, "initial")}
+          onPointerMove={(e) => onPointerMove(e, "initial")}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
         >
-          {content.targets.map((t) => (
-            <div
-              key={t.id}
-              aria-label={t.title}
-              style={{
-                position: "absolute",
-                left: relToPxX(t.position.x),
-                top: relToPxY(t.position.y),
-                width: relToPxX(t.size.width),
-                height: relToPxY(t.size.height),
-                backgroundColor: t.src
-                  ? "transparent"
-                  : t.color || "transparent",
-              }}
-            >
-              {t.src ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={t.src}
-                  alt={t.title || t.id}
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "contain",
-                  }}
-                />
-              ) : null}
-            </div>
-          ))}
-          {content.items.map((it) => (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              key={it.id}
-              src={it.src}
-              alt={it.title}
-              style={{
-                position: "absolute",
-                left: relToPxX(it.position.initial.x),
-                top: relToPxY(it.position.initial.y),
-                width: relToPxX(it.size.width),
-                height: relToPxY(it.size.height),
-                objectFit: "contain",
-                pointerEvents: "none",
-              }}
-            />
-          ))}
+          {/* Targets (draggable) */}
+          {content.targets.map((t) => {
+            const isSelected =
+              selection?.kind === "target" && selection?.id === t.id;
+            return (
+              <div
+                key={t.id}
+                aria-label={t.title}
+                className={`absolute ${makeSelectableOutline(
+                  isSelected
+                )} cursor-move`}
+                style={{
+                  left: relToPxX(t.position.x),
+                  top: relToPxY(t.position.y),
+                  width: relToPxX(t.size.width),
+                  height: relToPxY(t.size.height),
+                  backgroundColor: t.src
+                    ? "transparent"
+                    : t.color || "transparent",
+                }}
+                onPointerDown={(e) =>
+                  beginDrag(
+                    e,
+                    { kind: "target", id: t.id },
+                    t.position.x,
+                    t.position.y,
+                    t.size.width,
+                    t.size.height
+                  )
+                }
+              >
+                {t.src ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={t.src}
+                    alt={t.title || t.id}
+                    draggable={false}
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                      pointerEvents: "none",
+                      userSelect: "none",
+                    }}
+                  />
+                ) : null}
+              </div>
+            );
+          })}
+
+          {/* Items (initial position draggable) */}
+          {content.items.map((it) => {
+            const isSelected =
+              selection?.kind === "item" &&
+              selection.stage === "initial" &&
+              selection.id === it.id;
+            return (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                key={it.id}
+                src={it.src}
+                alt={it.title}
+                draggable={false}
+                className={`${makeSelectableOutline(
+                  isSelected
+                )} cursor-move absolute`}
+                style={{
+                  left: relToPxX(it.position.initial.x),
+                  top: relToPxY(it.position.initial.y),
+                  width: relToPxX(it.size.width),
+                  height: relToPxY(it.size.height),
+                  objectFit: "contain",
+                  userSelect: "none",
+                  touchAction: "none",
+                }}
+                onPointerDown={(e) =>
+                  beginDrag(
+                    e,
+                    { kind: "item", id: it.id, stage: "initial" },
+                    it.position.initial.x,
+                    it.position.initial.y,
+                    it.size.width,
+                    it.size.height
+                  )
+                }
+              />
+            );
+          })}
         </div>
 
-        {/* Final (single-final preview only) */}
+        {/* Final (single-final preview only, editable for items with .final) */}
         <div
+          ref={stageRefFinal}
           className={previewStageClass}
           style={{
             width: SCREEN_WIDTH,
@@ -258,7 +549,12 @@ export default function DragDropEditor({
               : undefined,
             backgroundSize: "cover",
             backgroundPosition: "center",
+            touchAction: "none",
           }}
+          onPointerDown={(e) => onStageBackgroundPointerDown(e, "final")}
+          onPointerMove={(e) => onPointerMove(e, "final")}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
         >
           {content.targets.map((t) => (
             <div
@@ -273,6 +569,7 @@ export default function DragDropEditor({
                 backgroundColor: t.src
                   ? "transparent"
                   : t.color || "transparent",
+                pointerEvents: "none",
               }}
             >
               {t.src ? (
@@ -280,10 +577,12 @@ export default function DragDropEditor({
                 <img
                   src={t.src}
                   alt={t.title || t.id}
+                  draggable={false}
                   style={{
                     width: "100%",
                     height: "100%",
                     objectFit: "contain",
+                    userSelect: "none",
                   }}
                 />
               ) : null}
@@ -296,19 +595,93 @@ export default function DragDropEditor({
                 key={it.id}
                 src={it.src}
                 alt={it.title}
+                draggable={false}
+                className={`absolute cursor-move ${
+                  selection?.kind === "item" &&
+                  selection.stage === "final" &&
+                  selection.id === it.id
+                    ? "outline outline-2 outline-blue-600"
+                    : "outline-none"
+                }`}
                 style={{
-                  position: "absolute",
                   left: relToPxX(it.position.final.x),
                   top: relToPxY(it.position.final.y),
                   width: relToPxX(it.size.width),
                   height: relToPxY(it.size.height),
                   objectFit: "contain",
-                  pointerEvents: "none",
+                  userSelect: "none",
+                  touchAction: "none",
                 }}
+                onPointerDown={(e) =>
+                  beginDrag(
+                    e,
+                    { kind: "item", id: it.id, stage: "final" },
+                    it.position.final!.x,
+                    it.position.final!.y,
+                    it.size.width,
+                    it.size.height
+                  )
+                }
               />
             ) : null
           )}
         </div>
+      </div>
+
+      {/* --------- Selection controls (single size slider) --------- */}
+      <div className="rounded-md border p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-sm font-semibold">Selection</div>
+          <button
+            className="text-xs underline"
+            onClick={() => setSelection(null)}
+          >
+            Deselect
+          </button>
+        </div>
+
+        {selectedEntity ? (
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div className="rounded bg-stone-50 p-3">
+              <div className="text-xs font-semibold mb-2">Type / ID</div>
+              <div className="text-sm">
+                <span className="font-mono">
+                  {selectedEntity.type === "item"
+                    ? `item:${selectedEntity.value.id}`
+                    : `target:${selectedEntity.value.id}`}
+                </span>
+                {selectedEntity.type === "item" ? (
+                  <span className="ml-2 text-xs text-slate-600">
+                    (stage: {selectedEntity.stage})
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="rounded bg-stone-50 p-3">
+              <div className="text-xs font-semibold mb-2">
+                Size (uniform scale; width)
+              </div>
+              <label className="block text-xs mb-1">
+                Width: {selectedWidthPx}px
+              </label>
+              <input
+                type="range"
+                min={SLIDER_MIN_W}
+                max={SLIDER_MAX_W}
+                step={1}
+                value={Number.isFinite(selectedWidthPx) ? selectedWidthPx : 0}
+                onChange={(e) => setSelectedWidthPx(Number(e.target.value))}
+                className="w-full"
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="mt-2 text-sm text-slate-600">
+            Click an item/target on the stage to select. Drag to move. Use the
+            slider to resize (keeps aspect ratio).
+          </div>
+        )}
       </div>
 
       {/* --------- Tabs --------- */}
