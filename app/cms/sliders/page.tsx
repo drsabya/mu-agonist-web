@@ -4,7 +4,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /** Item model */
 type Kind = "svg" | "image";
-type MoveDir = "horizontal" | "vertical" | "diag1" | "diag2";
+type MoveDir =
+  | "horizontal"
+  | "horizontalRev"
+  | "vertical"
+  | "verticalRev"
+  | "diag1"
+  | "diag1Rev"
+  | "diag2"
+  | "diag2Rev";
+
 type Item = {
   id: string;
   kind: Kind;
@@ -22,6 +31,9 @@ type Item = {
   moveable: boolean; // XOR with resizeable
   resizeable: boolean; // XOR with moveable
   moveDir: MoveDir; // used only if moveable
+
+  // NEW: per-item scale factor (applies only when resizeable)
+  scaleFactor: number; // 1 => at slider max, width = canvas width
 };
 
 type Snapshot = { items: Item[]; selectedId: string | null; canvasBg: string };
@@ -223,10 +235,23 @@ const I = {
       />
     </svg>
   ),
+  // Direction glyphs (forward + reverse)
   horiz: (
     <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
       <path
-        d="M3 12h18M15 6l6 6-6 6"
+        d="M3 12h18M9 6l6 6-6 6"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  horizRev: (
+    <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M3 12h18M15 6l-6 6 6 6"
         stroke="currentColor"
         strokeWidth="2"
         fill="none"
@@ -247,6 +272,18 @@ const I = {
       />
     </svg>
   ),
+  vertRev: (
+    <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M12 3v18M6 15l6 6 6-6"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
   diag1: (
     <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
       <path
@@ -259,10 +296,34 @@ const I = {
       />
     </svg>
   ),
+  diag1Rev: (
+    <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M4 4l16 16M4 14v6h6"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
   diag2: (
     <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
       <path
         d="M20 4L4 20M14 20H4V10"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  diag2Rev: (
+    <svg className="size-3.5" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M20 4L4 20M20 14v6h-6"
         stroke="currentColor"
         strokeWidth="2"
         fill="none"
@@ -308,15 +369,13 @@ export default function SlidersPage() {
     y: number;
     w: number;
     h: number;
-  }>({
-    x: 0,
-    y: 0,
-    w: 0,
-    h: 0,
-  });
+  }>({ x: 0, y: 0, w: 0, h: 0 });
 
-  // Preview slider value (0..100)
+  // Slider config
   const [previewRange, setPreviewRange] = useState<number>(50);
+  const [sliderMin, setSliderMin] = useState<number>(0);
+  const [sliderMax, setSliderMax] = useState<number>(100);
+  const [sliderStep, setSliderStep] = useState<number>(1);
 
   /* ===== Undo stack ===== */
   const undoStackRef = useRef<Snapshot[]>([]);
@@ -381,6 +440,11 @@ export default function SlidersPage() {
     return () => ro.disconnect();
   }, []);
 
+  /* Clamp preview value if min/max change */
+  useEffect(() => {
+    setPreviewRange((v) => Math.min(Math.max(v, sliderMin), sliderMax));
+  }, [sliderMin, sliderMax]);
+
   /* ===== Measure selected item's box ===== */
   useEffect(() => {
     const id = selectedId;
@@ -425,8 +489,9 @@ export default function SlidersPage() {
         wPct: 0.5,
         rot: 0,
         moveable: false,
-        resizeable: true, // sensible default
+        resizeable: true, // default
         moveDir: "horizontal",
+        scaleFactor: 1, // default per-item
       }));
       setItems((prev) => [...prev, ...newItems]);
       setSelectedId(newItems[newItems.length - 1].id);
@@ -449,6 +514,7 @@ export default function SlidersPage() {
         moveable: false,
         resizeable: true,
         moveDir: "horizontal",
+        scaleFactor: 1,
       }));
       setItems((prev) => [...prev, ...newItems]);
       setSelectedId(newItems[newItems.length - 1].id);
@@ -847,7 +913,7 @@ export default function SlidersPage() {
       const start = resizeStartRef.current;
       let targetWidthPx = Math.abs(pointerX - start.cxPx) * 2;
       const minPx = rect.width * 0.05;
-      const maxPx = rect.width * 2.0;
+      const maxPx = rect.width * 3.0; // allow larger edits
       targetWidthPx = Math.max(minPx, Math.min(maxPx, targetWidthPx));
       const newWPct = targetWidthPx / rect.width;
 
@@ -904,7 +970,7 @@ export default function SlidersPage() {
     gestureSnapSavedRef.current = false;
   };
 
-  /* ===== Tag helpers (mutually exclusive) ===== */
+  /* ===== Tag helpers (mutually exclusive toggles) ===== */
   const onDelete = () => {
     if (previewMode || !selectedId) return;
     pushSnapshot();
@@ -955,6 +1021,12 @@ export default function SlidersPage() {
       prev.map((it) => (it.id === selectedId ? { ...it, moveDir: dir } : it))
     );
   };
+  const setScaleFactor = (v: number) => {
+    if (!selectedId) return;
+    setItems((prev) =>
+      prev.map((it) => (it.id === selectedId ? { ...it, scaleFactor: v } : it))
+    );
+  };
 
   /* ===== Derived values ===== */
   const sel = selectedItem;
@@ -975,8 +1047,17 @@ export default function SlidersPage() {
   const totalMoveable = items.filter((i) => i.moveable).length;
   const totalResizeable = items.filter((i) => i.resizeable).length;
 
+  /* ===== Slider normalization ===== */
+  const normT = (() => {
+    const span = Math.max(1e-9, sliderMax - sliderMin);
+    const t0 = (previewRange - sliderMin) / span;
+    return Math.max(0, Math.min(1, t0));
+  })();
+
+  const clamp = (x: number, lo: number, hi: number) =>
+    Math.max(lo, Math.min(hi, x));
+
   /* ===== Preview application (non-destructive; affects ALL tagged items) ===== */
-  const t = previewRange / 100; // 0..1
   function getPreviewFrame(it: Item) {
     // base values
     let cx = it.cxPct;
@@ -985,29 +1066,64 @@ export default function SlidersPage() {
 
     if (previewMode) {
       if (it.resizeable) {
-        // scale around center (0.2x .. 2.0x)
-        const scale = 0.2 + 1.8 * t; // 0.2→2.0
-        w = Math.max(0.02, Math.min(2.0, it.wPct * scale));
+        // Per spec: with scaleFactor=1, slider max => width = canvas width (wPct=1)
+        // With larger scaleFactor, allow >1 (capped to 3x for sanity; adjust if you want).
+        const s = clamp(it.scaleFactor ?? 1, 0.1, 3);
+        const minWPct = 0.02; // avoid disappearing at min
+        const maxWPct = 1 * s; // canvas-width * scaleFactor
+        w = minWPct + (maxWPct - minWPct) * normT;
       } else if (it.moveable) {
-        // move along direction; stay inside canvas using per-item margin
-        const margin = Math.min(0.5, Math.max(0.02, it.wPct * 0.5));
-        const min = margin;
-        const max = 1 - margin;
+        // Movement covers the entire canvas extent, keeping item fully visible.
+        const canvasW = Math.max(1, canvasSize.w);
+        const canvasH = Math.max(1, canvasSize.h);
+
+        // Try to use the rendered node size if available for accurate margins.
+        const host = hostRefs.current[it.id];
+        const hostRect = host?.getBoundingClientRect();
+        const halfWpx = hostRect ? hostRect.width / 2 : (it.wPct * canvasW) / 2;
+        const halfHpx = hostRect
+          ? hostRect.height / 2
+          : (it.wPct * canvasW) / 2; // fallback approximation
+
+        const marginX = clamp(halfWpx / canvasW, 0, 0.5);
+        const marginY = clamp(halfHpx / canvasH, 0, 0.5);
+
+        // Start/end anchors that keep the whole item on-canvas.
+        const startX = marginX;
+        const endX = 1 - marginX;
+        const startY = marginY;
+        const endY = 1 - marginY;
+
+        const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
         switch (it.moveDir) {
-          case "horizontal":
-            cx = min + (max - min) * t;
+          case "horizontal": // left -> right
+            cx = lerp(startX, endX, normT);
             break;
-          case "vertical":
-            cy = min + (max - min) * t;
+          case "horizontalRev": // right -> left
+            cx = lerp(endX, startX, normT);
             break;
-          case "diag1": // left-top -> bottom-right
-            cx = min + (max - min) * t;
-            cy = min + (max - min) * t;
+          case "vertical": // top -> bottom
+            cy = lerp(startY, endY, normT);
             break;
-          case "diag2": // right-top -> left-bottom
-            cx = max - (max - min) * t;
-            cy = min + (max - min) * t;
+          case "verticalRev": // bottom -> top
+            cy = lerp(endY, startY, normT);
+            break;
+          case "diag1": // top-left -> bottom-right
+            cx = lerp(startX, endX, normT);
+            cy = lerp(startY, endY, normT);
+            break;
+          case "diag1Rev": // bottom-right -> top-left
+            cx = lerp(endX, startX, normT);
+            cy = lerp(endY, startY, normT);
+            break;
+          case "diag2": // top-right -> bottom-left
+            cx = lerp(endX, startX, normT);
+            cy = lerp(startY, endY, normT);
+            break;
+          case "diag2Rev": // bottom-left -> top-right
+            cx = lerp(startX, endX, normT);
+            cy = lerp(endY, startY, normT);
             break;
         }
       }
@@ -1171,7 +1287,9 @@ export default function SlidersPage() {
                 : "bg-white text-gray-700 hover:bg-gray-100 active:bg-gray-200"
             }`}
             onClick={() =>
-              setPreviewMode((p) => (p ? (setPreviewRange(50), false) : true))
+              setPreviewMode((p) =>
+                p ? (setPreviewRange((sliderMin + sliderMax) / 2), false) : true
+              )
             }
             title={previewMode ? "Exit Preview" : "Enter Preview"}
           >
@@ -1194,7 +1312,7 @@ export default function SlidersPage() {
 
         {/* Item tagging (Edit mode only) */}
         {!previewMode && selectedItem && (
-          <div className="mb-2 flex items-center justify-center gap-3 text-xs">
+          <div className="mb-2 flex flex-wrap items-center justify-center gap-3 text-xs">
             <label className="inline-flex items-center gap-1">
               <input
                 type="checkbox"
@@ -1222,6 +1340,7 @@ export default function SlidersPage() {
             {selectedItem.moveable && (
               <div className="inline-flex items-center gap-1">
                 <span className="text-gray-600 mr-1">Direction:</span>
+
                 <button
                   className={`px-1.5 py-0.5 rounded border text-xs ${
                     selectedItem.moveDir === "horizontal"
@@ -1229,10 +1348,22 @@ export default function SlidersPage() {
                       : "border-gray-300 bg-white text-gray-700"
                   }`}
                   onClick={() => setMoveDir("horizontal")}
-                  title="Horizontal"
+                  title="Horizontal →"
                 >
                   {I.horiz}
                 </button>
+                <button
+                  className={`px-1.5 py-0.5 rounded border text-xs ${
+                    selectedItem.moveDir === "horizontalRev"
+                      ? "border-gray-900 bg-gray-900 text-white"
+                      : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                  onClick={() => setMoveDir("horizontalRev")}
+                  title="Horizontal ←"
+                >
+                  {I.horizRev}
+                </button>
+
                 <button
                   className={`px-1.5 py-0.5 rounded border text-xs ${
                     selectedItem.moveDir === "vertical"
@@ -1240,10 +1371,22 @@ export default function SlidersPage() {
                       : "border-gray-300 bg-white text-gray-700"
                   }`}
                   onClick={() => setMoveDir("vertical")}
-                  title="Vertical"
+                  title="Vertical ↓"
                 >
                   {I.vert}
                 </button>
+                <button
+                  className={`px-1.5 py-0.5 rounded border text-xs ${
+                    selectedItem.moveDir === "verticalRev"
+                      ? "border-gray-900 bg-gray-900 text-white"
+                      : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                  onClick={() => setMoveDir("verticalRev")}
+                  title="Vertical ↑"
+                >
+                  {I.vertRev}
+                </button>
+
                 <button
                   className={`px-1.5 py-0.5 rounded border text-xs ${
                     selectedItem.moveDir === "diag1"
@@ -1257,6 +1400,18 @@ export default function SlidersPage() {
                 </button>
                 <button
                   className={`px-1.5 py-0.5 rounded border text-xs ${
+                    selectedItem.moveDir === "diag1Rev"
+                      ? "border-gray-900 bg-gray-900 text-white"
+                      : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                  onClick={() => setMoveDir("diag1Rev")}
+                  title="Diagonal ↖︎"
+                >
+                  {I.diag1Rev}
+                </button>
+
+                <button
+                  className={`px-1.5 py-0.5 rounded border text-xs ${
                     selectedItem.moveDir === "diag2"
                       ? "border-gray-900 bg-gray-900 text-white"
                       : "border-gray-300 bg-white text-gray-700"
@@ -1266,7 +1421,39 @@ export default function SlidersPage() {
                 >
                   {I.diag2}
                 </button>
+                <button
+                  className={`px-1.5 py-0.5 rounded border text-xs ${
+                    selectedItem.moveDir === "diag2Rev"
+                      ? "border-gray-900 bg-gray-900 text-white"
+                      : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                  onClick={() => setMoveDir("diag2Rev")}
+                  title="Diagonal ↗︎"
+                >
+                  {I.diag2Rev}
+                </button>
               </div>
+            )}
+
+            {/* Per-item Scale Factor (only if resizeable) */}
+            {selectedItem.resizeable && (
+              <label className="inline-flex items-center gap-1">
+                <span className="text-gray-600">Scale Factor</span>
+                <input
+                  type="number"
+                  className="w-20 px-1 py-0.5 border border-gray-300 rounded"
+                  value={selectedItem.scaleFactor}
+                  min={0.1}
+                  max={3}
+                  step={0.1}
+                  onChange={(e) =>
+                    setScaleFactor(
+                      Math.max(0.1, Math.min(3, Number(e.target.value)))
+                    )
+                  }
+                  title="Affects only resizing; 1 means width=canvas width at slider max"
+                />
+              </label>
             )}
           </div>
         )}
@@ -1442,31 +1629,81 @@ export default function SlidersPage() {
                 +<span className="px-1 border border-gray-300 rounded">V</span>.
                 Edit mode: drag / corner-resize / rotate. Tag items as <b>M</b>{" "}
                 or <b>R</b>. In Preview, the slider moves all <b>M</b> items and
-                resizes all <b>R</b> items at once.
+                resizes all <b>R</b> items at once. Movement spans full canvas.
               </div>
             </div>
           )}
         </div>
 
         {/* Preview slider (enabled whenever Preview is on and there’s at least one item) */}
-        <div className="mt-2 flex items-center gap-2">
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={1}
-            value={previewRange}
-            onChange={(e) => setPreviewRange(Number(e.target.value))}
-            className="w-full accent-gray-800"
-            disabled={!previewMode || items.length === 0}
-            title="In Preview, this moves all Moveable items and resizes all Resizeable items"
-          />
-          <span className="w-20 text-right text-[11px] text-gray-600">
-            {previewRange}
-            <span className="ml-2 inline-block px-1 py-0.5 rounded bg-gray-200 text-gray-700">
-              M:{totalMoveable} · R:{totalResizeable}
+        <div className="mt-2 grid grid-cols-1 gap-2">
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={sliderMin}
+              max={sliderMax}
+              step={sliderStep}
+              value={previewRange}
+              onChange={(e) => setPreviewRange(Number(e.target.value))}
+              className="w-full accent-gray-800"
+              disabled={!previewMode || items.length === 0}
+              title="In Preview, this moves all Moveable items and resizes all Resizeable items"
+            />
+            <span className="w-20 text-right text-[11px] text-gray-600">
+              {previewRange}
+              <span className="ml-2 inline-block px-1 py-0.5 rounded bg-gray-200 text-gray-700">
+                M:{totalMoveable} · R:{totalResizeable}
+              </span>
             </span>
-          </span>
+          </div>
+
+          {/* Slider config (always editable) */}
+          <div className="flex items-center justify-between gap-2 text-[11px]">
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1">
+                <span className="text-gray-600">Min</span>
+                <input
+                  type="number"
+                  className="w-16 px-1 py-0.5 border border-gray-300 rounded"
+                  value={sliderMin}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setSliderMin(v);
+                    if (v >= sliderMax) setSliderMax(v + 1);
+                  }}
+                  step={1}
+                />
+              </label>
+              <label className="flex items-center gap-1">
+                <span className="text-gray-600">Max</span>
+                <input
+                  type="number"
+                  className="w-16 px-1 py-0.5 border border-gray-300 rounded"
+                  value={sliderMax}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setSliderMax(v);
+                    if (v <= sliderMin) setSliderMin(v - 1);
+                  }}
+                  step={1}
+                />
+              </label>
+              <label className="flex items-center gap-1">
+                <span className="text-gray-600">Step</span>
+                <input
+                  type="number"
+                  className="w-16 px-1 py-0.5 border border-gray-300 rounded"
+                  value={sliderStep}
+                  min={0.001}
+                  step={0.5}
+                  onChange={(e) => {
+                    const v = Math.max(0.001, Number(e.target.value));
+                    setSliderStep(v);
+                  }}
+                />
+              </label>
+            </div>
+          </div>
         </div>
 
         {/* Info Dialog */}
@@ -1520,7 +1757,11 @@ export default function SlidersPage() {
                     <div className="text-right">
                       {totalMoveable} / {totalResizeable}
                     </div>
-                    <div>Slider</div>
+                    <div>Slider (min / max / step)</div>
+                    <div className="text-right">
+                      {sliderMin} / {sliderMax} / {sliderStep}
+                    </div>
+                    <div>Slider Value</div>
                     <div className="text-right">{previewRange}</div>
                   </div>
                 </div>
@@ -1555,13 +1796,26 @@ export default function SlidersPage() {
                         <>
                           <div>Direction</div>
                           <div className="text-right">
-                            {selectedItem.moveDir === "horizontal"
-                              ? "Horizontal"
-                              : selectedItem.moveDir === "vertical"
-                              ? "Vertical"
-                              : selectedItem.moveDir === "diag1"
-                              ? "Diagonal ↘︎"
-                              : "Diagonal ↙︎"}
+                            {
+                              {
+                                horizontal: "Horizontal →",
+                                horizontalRev: "Horizontal ←",
+                                vertical: "Vertical ↓",
+                                verticalRev: "Vertical ↑",
+                                diag1: "Diagonal ↘︎",
+                                diag1Rev: "Diagonal ↖︎",
+                                diag2: "Diagonal ↙︎",
+                                diag2Rev: "Diagonal ↗︎",
+                              }[selectedItem.moveDir]
+                            }
+                          </div>
+                        </>
+                      )}
+                      {selectedItem?.resizeable && (
+                        <>
+                          <div>Scale Factor</div>
+                          <div className="text-right">
+                            {selectedItem.scaleFactor}
                           </div>
                         </>
                       )}
