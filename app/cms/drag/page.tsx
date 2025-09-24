@@ -6,27 +6,58 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 type Role = "none" | "draggable" | "target" | "tappable";
 type Kind = "svg" | "image";
 
+/** Single animation per item (no JSON) */
+type AnimType =
+  | "none"
+  | "move"
+  | "scale"
+  | "rotate"
+  | "opacity"
+  | "jitter"
+  | "pulse";
+type EasingKind = "linear" | "easeInOut";
+
 type Item = {
   id: string;
   kind: Kind;
-  // For SVG
-  svg?: string; // sanitized & namespaced <svg>…</svg>
-  // For Image
-  src?: string; // data URL for pasted images (png/jpg/webp)
+  svg?: string;
+  src?: string;
 
-  cxPct: number; // center X as fraction of canvas width [0..1]
-  cyPct: number; // center Y as fraction of canvas height [0..1]
-  wPct: number; // width as fraction of canvas width [0..1]
-  rot: number; // rotation in radians
+  cxPct: number; // [0..1]
+  cyPct: number; // [0..1]
+  wPct: number; // [0..1] width based on canvas width
+  rot: number; // radians
   role: Role;
 
-  // role-specific metadata
-  correctTargetId?: string; // for role === 'draggable'
-  tapMessage?: string; // for role === 'tappable'
+  // role meta
+  correctTargetId?: string; // for draggables
+  tapMessage?: string; // for tappables
 
-  // Optional "final position" for draggables (preview success → move here)
+  // "final position" for draggables
   finalCxPct?: number;
   finalCyPct?: number;
+
+  // === Simple, user-facing animation config (single type) ===
+  animType: AnimType;
+  animDurationMs?: number; // default 700
+  animDelayMs?: number; // default 0
+  animEasing?: EasingKind; // default easeInOut
+
+  // For move: where to move to (percent coords). Set via "Edit Anim Target".
+  animMoveCxPct?: number;
+  animMoveCyPct?: number;
+
+  // For scale: final width as % of canvas width. Set via "Edit Anim Scale".
+  animScaleWPct?: number;
+
+  // For rotate: radians to add
+  animRotateBy?: number;
+
+  // For opacity: target alpha [0..1]
+  animOpacityTo?: number;
+
+  // Optional: if tappable, allow tap to trigger scene animation
+  isSceneTrigger?: boolean;
 };
 
 type Snapshot = { items: Item[]; selectedId: string | null; canvasBg: string };
@@ -38,113 +69,52 @@ type PreviewPerItem = {
   completed: boolean; // true => hide in preview
 };
 
-function uid() {
-  return Math.random().toString(36).slice(2, 10);
-}
+/** Scene animation runtime overlay per item (applied on render) */
+type AnimOverlay = {
+  dxPx: number; // additional translation (pixels)
+  dyPx: number;
+  scale: number; // multiplicative
+  rotDelta: number; // radians
+  alpha: number; // multiplicative 0..1
+};
 
-function canonicalize(s: string) {
-  return s.replace(/\s+/g, " ").trim();
-}
+const ROLE_META: Record<
+  Role,
+  { label: string; badgeBg: string; badgeText: string; outline: string }
+> = {
+  none: {
+    label: "None",
+    badgeBg: "bg-gray-700",
+    badgeText: "text-white",
+    outline: "2px solid rgba(31,41,55,0.9)",
+  },
+  draggable: {
+    label: "Draggable",
+    badgeBg: "bg-blue-700",
+    badgeText: "text-white",
+    outline: "2px dashed rgba(29,78,216,0.9)",
+  },
+  target: {
+    label: "Target",
+    badgeBg: "bg-emerald-700",
+    badgeText: "text-white",
+    outline: "2px dashed rgba(5,150,105,0.9)",
+  },
+  tappable: {
+    label: "Tappable",
+    badgeBg: "bg-fuchsia-700",
+    badgeText: "text-white",
+    outline: "2px dashed rgba(162,28,175,0.9)",
+  },
+};
 
-/** Remove XML/DOCTYPE noise commonly present in clipboard SVGs */
-function stripXmlDoctype(s: string) {
-  return s.replace(/<\?xml[^>]*\?>/gi, "").replace(/<!DOCTYPE[^>]*>/gi, "");
-}
+const SNAP_MS = 280;
 
-/**
- * Namespace all ids inside an SVG string to avoid collisions between multiple pasted SVGs.
- */
-function namespaceSvgIds(svg: string, ns: string) {
-  let out = stripXmlDoctype(svg);
+/** Global options */
+const RESPECT_REDUCED_MOTION = true;
 
-  // id="foo" -> id="foo_ns"
-  out = out.replace(/\bid="([\w:-]+)"/g, (_m, id) => `id="${id}_${ns}"`);
-
-  // url(#foo) -> url(#foo_ns)
-  out = out.replace(/\burl\(#([\w:-]+)\)/g, (_m, id) => `url(#${id}_${ns})`);
-
-  // href="#foo" / xlink:href="#foo" -> "#foo_ns"
-  out = out.replace(
-    /\b(xlink:href|href)="#([\w:-]+)"/g,
-    (_m, attr, id) => `${attr}="#${id}_${ns}"`
-  );
-
-  // aria-labelledby="a b c" -> suffixed
-  out = out.replace(/\baria-labelledby="([^"]+)"/g, (_m, ids) => {
-    const replaced = ids
-      .split(/\s+/)
-      .map((id: string) => `${id}_${ns}`)
-      .join(" ");
-    return `aria-labelledby="${replaced}"`;
-  });
-
-  return out;
-}
-
-/** Extract SVGs when payload MIME is image/svg+xml. (XML parser only) */
-function extractFromSvgXml(xml: string): string[] {
-  const cleaned = stripXmlDoctype(xml);
-  const p = new DOMParser();
-  const doc = p.parseFromString(cleaned, "image/svg+xml");
-  const svgs = Array.from(doc.querySelectorAll("svg")).map((n) => n.outerHTML);
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const s of svgs) {
-    const c = canonicalize(s);
-    if (!seen.has(c)) {
-      seen.add(c);
-      out.push(s);
-    }
-  }
-  if (out.length === 0 && cleaned.toLowerCase().includes("<svg"))
-    out.push(cleaned);
-  return out;
-}
-
-/** Extract SVGs when payload MIME is text/html. (HTML parser only) */
-function extractFromHtml(html: string): string[] {
-  const p = new DOMParser();
-  const doc = p.parseFromString(html, "text/html");
-  const svgs = Array.from(doc.querySelectorAll("svg")).map((n) => n.outerHTML);
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const s of svgs) {
-    const c = canonicalize(s);
-    if (!seen.has(c)) {
-      seen.add(c);
-      out.push(s);
-    }
-  }
-  return out;
-}
-
-/** Extract SVGs when payload MIME is text/plain. (Regex only) */
-function extractFromPlain(text: string): string[] {
-  const cleaned = stripXmlDoctype(text);
-  const matches = cleaned.match(/<svg[\s\S]*?<\/svg>/gi) ?? [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const m of matches) {
-    const c = canonicalize(m);
-    if (!seen.has(c)) {
-      seen.add(c);
-      out.push(m);
-    }
-  }
-  if (out.length === 0 && cleaned.toLowerCase().includes("<svg"))
-    out.push(cleaned);
-  return out;
-}
-
-/** Convert Blob -> data URL (for images) */
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result));
-    fr.onerror = reject;
-    fr.readAsDataURL(blob);
-  });
-}
+/** Scene trigger mode */
+type SceneTriggerMode = "all-correct" | "tap" | "either";
 
 /* --- Tiny monochrome icons (no deps) --- */
 const I = {
@@ -266,40 +236,118 @@ const I = {
   ),
 };
 
-/* Role visuals */
-const ROLE_META: Record<
-  Role,
-  { label: string; badgeBg: string; badgeText: string; outline: string }
-> = {
-  none: {
-    label: "None",
-    badgeBg: "bg-gray-700",
-    badgeText: "text-white",
-    outline: "2px solid rgba(31,41,55,0.9)",
-  },
-  draggable: {
-    label: "Draggable",
-    badgeBg: "bg-blue-700",
-    badgeText: "text-white",
-    outline: "2px dashed rgba(29,78,216,0.9)", // blue
-  },
-  target: {
-    label: "Target",
-    badgeBg: "bg-emerald-700",
-    badgeText: "text-white",
-    outline: "2px dashed rgba(5,150,105,0.9)", // green
-  },
-  tappable: {
-    label: "Tappable",
-    badgeBg: "bg-fuchsia-700",
-    badgeText: "text-white",
-    outline: "2px dashed rgba(162,28,175,0.9)", // fuchsia
-  },
+/* ===== Utility funcs ===== */
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
+}
+function canonicalize(s: string) {
+  return s.replace(/\s+/g, " ").trim();
+}
+function stripXmlDoctype(s: string) {
+  return s.replace(/<\?xml[^>]*\?>/gi, "").replace(/<!DOCTYPE[^>]*>/gi, "");
+}
+function namespaceSvgIds(svg: string, ns: string) {
+  let out = stripXmlDoctype(svg);
+  out = out.replace(/\bid="([\w:-]+)"/g, (_m, id) => `id="${id}_${ns}"`);
+  out = out.replace(/\burl\(#([\w:-]+)\)/g, (_m, id) => `url(#${id}_${ns})`);
+  out = out.replace(
+    /\b(xlink:href|href)="#([\w:-]+)"/g,
+    (_m, attr, id) => `${attr}="#${id}_${ns}"`
+  );
+  out = out.replace(/\baria-labelledby="([^"]+)"/g, (_m, ids) => {
+    const replaced = ids
+      .split(/\s+/)
+      .map((id: string) => `${id}_${ns}`)
+      .join(" ");
+    return `aria-labelledby="${replaced}"`;
+  });
+  return out;
+}
+function extractFromSvgXml(xml: string): string[] {
+  const cleaned = stripXmlDoctype(xml);
+  const p = new DOMParser();
+  const doc = p.parseFromString(cleaned, "image/svg+xml");
+  const svgs = Array.from(doc.querySelectorAll("svg")).map((n) => n.outerHTML);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of svgs) {
+    const c = canonicalize(s);
+    if (!seen.has(c)) {
+      seen.add(c);
+      out.push(s);
+    }
+  }
+  if (out.length === 0 && cleaned.toLowerCase().includes("<svg"))
+    out.push(cleaned);
+  return out;
+}
+function extractFromHtml(html: string): string[] {
+  const p = new DOMParser();
+  const doc = p.parseFromString(html, "text/html");
+  const svgs = Array.from(doc.querySelectorAll("svg")).map((n) => n.outerHTML);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of svgs) {
+    const c = canonicalize(s);
+    if (!seen.has(c)) {
+      seen.add(c);
+      out.push(s);
+    }
+  }
+  return out;
+}
+function extractFromPlain(text: string): string[] {
+  const cleaned = stripXmlDoctype(text);
+  const matches = cleaned.match(/<svg[\s\S]*?<\/svg>/gi) ?? [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of matches) {
+    const c = canonicalize(m);
+    if (!seen.has(c)) {
+      seen.add(c);
+      out.push(m);
+    }
+  }
+  if (out.length === 0 && cleaned.toLowerCase().includes("<svg"))
+    out.push(cleaned);
+  return out;
+}
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result));
+    fr.onerror = reject;
+    fr.readAsDataURL(blob);
+  });
+}
+
+/* ===== Easings ===== */
+function ease(t: number, kind: EasingKind | undefined) {
+  if (kind === "easeInOut") return t * t * (3 - 2 * t); // smoothstep
+  return t;
+}
+/* ===== prefers-reduced-motion ===== */
+function prefersReducedMotion(): boolean {
+  if (!RESPECT_REDUCED_MOTION) return false;
+  if (typeof window === "undefined" || !("matchMedia" in window)) return false;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/* ===== Shared standard for jitter / pulse (same for every object) ===== */
+const STANDARD_JITTER = {
+  amplitudePct: 0.01, // 1% of canvas
+  frequency: 8, // Hz
+  axes: "both" as "x" | "y" | "both",
+};
+const STANDARD_PULSE = {
+  min: 0.95,
+  max: 1.08,
+  cycles: 2,
 };
 
-/** Animation timings (preview snap / return) */
-const SNAP_MS = 280;
-
+/* ============================
+   Component
+   ============================ */
 export default function SvgCopyPage() {
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -324,7 +372,11 @@ export default function SvgCopyPage() {
     open: boolean;
     title: string;
     message?: string;
-  }>({ open: false, title: "", message: "" });
+  }>({
+    open: false,
+    title: "",
+    message: "",
+  });
 
   // preview mode
   const [previewMode, setPreviewMode] = useState(false);
@@ -332,7 +384,7 @@ export default function SvgCopyPage() {
   // layer visibility toggle (hide items where z != 0)
   const [hideNonZeroZ, setHideNonZeroZ] = useState(false);
 
-  // selected element metrics (relative to canvas, in px)
+  // selected element metrics (px)
   const [selInfo, setSelInfo] = useState<{
     x: number;
     y: number;
@@ -345,7 +397,11 @@ export default function SvgCopyPage() {
     h: 0,
   });
 
-  /* ===== Preview-only positions & completion (fix for your issue) ===== */
+  /* ===== Scene Trigger Mode ===== */
+  const [sceneTriggerMode, setSceneTriggerMode] =
+    useState<SceneTriggerMode>("either");
+
+  /* ===== Preview-only positions & completion ===== */
   const [previewMap, setPreviewMap] = useState<Record<string, PreviewPerItem>>(
     {}
   );
@@ -356,21 +412,38 @@ export default function SvgCopyPage() {
     cyPct: number;
   } | null>(null);
 
-  // Initialize preview state when entering preview, and clear when leaving
+  // NEW: Track which draggables-with-target have been "placed":
+  // - If item has final position: after it snaps/moves to final
+  // - If item has NO final position: immediately upon correct drop
+  const [placedSet, setPlacedSet] = useState<Set<string>>(new Set());
+  const placedSetRef = useRef<Set<string>>(new Set());
+  const setPlacedSafe = (updater: (prev: Set<string>) => Set<string>) => {
+    setPlacedSet((prev) => {
+      const next = updater(prev);
+      placedSetRef.current = new Set(next);
+      return next;
+    });
+  };
+
+  // Initialize preview state on enter/exit Preview
   useEffect(() => {
     if (previewMode) {
       const m: Record<string, PreviewPerItem> = {};
-      for (const it of items) {
+      for (const it of items)
         m[it.id] = { cxPct: it.cxPct, cyPct: it.cyPct, completed: false };
-      }
       setPreviewMap(m);
       setAnimatingIds(new Set());
       previewDragStartRef.current = null;
+      resetSceneAnim();
+      setPlacedSafe(() => new Set());
     } else {
       setPreviewMap({});
       setAnimatingIds(new Set());
       previewDragStartRef.current = null;
+      resetSceneAnim();
+      setPlacedSafe(() => new Set());
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewMode, items]);
 
   /* ===== Undo stack ===== */
@@ -451,7 +524,7 @@ export default function SvgCopyPage() {
     return () => ro.disconnect();
   }, []);
 
-  /* ===== Measure selected item's box ===== */
+  /* ===== Measure selected item ===== */
   useEffect(() => {
     const id = selectedId;
     const canvasEl = canvasRef.current;
@@ -481,12 +554,11 @@ export default function SvgCopyPage() {
     };
   }, [items, selectedId, canvasSize]);
 
-  /* ===== Helpers: add new items ===== */
+  /* ===== Add new items ===== */
   const addSvgItems = useCallback(
     (svgs: string[]) => {
       if (svgs.length === 0) return;
       pushSnapshot();
-
       const newItems: Item[] = svgs.map((svg, idx) => ({
         id: uid(),
         kind: "svg",
@@ -496,8 +568,11 @@ export default function SvgCopyPage() {
         wPct: 0.5,
         rot: 0,
         role: "none",
+        animType: "none",
+        animDurationMs: 700,
+        animDelayMs: 0,
+        animEasing: "easeInOut",
       }));
-
       setItems((prev) => [...prev, ...newItems]);
       setSelectedId(newItems[newItems.length - 1].id);
     },
@@ -508,7 +583,6 @@ export default function SvgCopyPage() {
     (srcs: string[]) => {
       if (srcs.length === 0) return;
       pushSnapshot();
-
       const newItems: Item[] = srcs.map((src, idx) => ({
         id: uid(),
         kind: "image",
@@ -518,8 +592,11 @@ export default function SvgCopyPage() {
         wPct: 0.5,
         rot: 0,
         role: "none",
+        animType: "none",
+        animDurationMs: 700,
+        animDelayMs: 0,
+        animEasing: "easeInOut",
       }));
-
       setItems((prev) => [...prev, ...newItems]);
       setSelectedId(newItems[newItems.length - 1].id);
     },
@@ -536,8 +613,6 @@ export default function SvgCopyPage() {
       if (flavor === "image/svg+xml") svgs = extractFromSvgXml(payload);
       else if (flavor === "text/html") svgs = extractFromHtml(payload);
       else svgs = extractFromPlain(payload);
-
-      // Namespace ids to avoid Chrome duplicate-id blank bug
       const nssvgs = svgs.map((s) => namespaceSvgIds(s, uid()));
       if (nssvgs.length) addSvgItems(nssvgs);
     },
@@ -548,30 +623,22 @@ export default function SvgCopyPage() {
   useEffect(() => {
     const onPaste = async (e: ClipboardEvent) => {
       if (!e.clipboardData) return;
-
-      // If focus is in an input/textarea/contenteditable, let the browser handle paste.
       const ae = document.activeElement as HTMLElement | null;
       if (
         ae &&
         (ae.tagName === "INPUT" ||
           ae.tagName === "TEXTAREA" ||
           ae.isContentEditable)
-      ) {
+      )
         return;
-      }
 
       const itemsArr = Array.from(e.clipboardData.items || []);
-
-      // 1) Image blobs first (png/jpeg/webp)
       const imageMimes = ["image/png", "image/jpeg", "image/webp"];
       const imageSrcs: string[] = [];
       for (const it of itemsArr) {
         if (imageMimes.includes(it.type)) {
           const f = it.getAsFile();
-          if (f) {
-            const dataUrl = await blobToDataUrl(f);
-            imageSrcs.push(dataUrl);
-          }
+          if (f) imageSrcs.push(await blobToDataUrl(f));
         }
       }
       if (imageSrcs.length) {
@@ -580,7 +647,6 @@ export default function SvgCopyPage() {
         return;
       }
 
-      // 2) SVG / HTML / Plain
       const readItemsByType = async (mime: string): Promise<string | null> => {
         for (const it of itemsArr) {
           if (it.type === mime) {
@@ -619,7 +685,7 @@ export default function SvgCopyPage() {
     return () => window.removeEventListener("paste", onPaste);
   }, [applyPastedPayload, addImageItems]);
 
-  /* ===== Mobile-friendly paste button (supports images) ===== */
+  /* ===== Mobile-friendly paste button ===== */
   const pasteFromClipboard = useCallback(async () => {
     try {
       const nav = navigator as Navigator & {
@@ -628,13 +694,10 @@ export default function SvgCopyPage() {
           readText?: () => Promise<string>;
         };
       };
-
       if (nav.clipboard?.read) {
-        const items = await nav.clipboard.read();
-
-        // Prioritize image types
+        const itemsC = await nav.clipboard.read();
         const imageSrcs: string[] = [];
-        for (const ci of items) {
+        for (const ci of itemsC) {
           const mime = ci.types.find((t) =>
             ["image/png", "image/jpeg", "image/webp"].includes(t)
           );
@@ -647,9 +710,7 @@ export default function SvgCopyPage() {
           addImageItems(imageSrcs);
           return;
         }
-
-        // Then SVG
-        for (const ci of items) {
+        for (const ci of itemsC) {
           if (ci.types?.includes("image/svg+xml")) {
             const blob = await ci.getType("image/svg+xml");
             const payload = await blob.text();
@@ -657,7 +718,7 @@ export default function SvgCopyPage() {
             return;
           }
         }
-        for (const ci of items) {
+        for (const ci of itemsC) {
           if (ci.types?.includes("text/html")) {
             const blob = await ci.getType("text/html");
             const payload = await blob.text();
@@ -665,7 +726,7 @@ export default function SvgCopyPage() {
             return;
           }
         }
-        for (const ci of items) {
+        for (const ci of itemsC) {
           if (ci.types?.includes("text/plain")) {
             const blob = await ci.getType("text/plain");
             const payload = await blob.text();
@@ -674,7 +735,6 @@ export default function SvgCopyPage() {
           }
         }
       }
-
       if (navigator.clipboard && "readText" in navigator.clipboard) {
         const text = await navigator.clipboard.readText();
         if (text) {
@@ -682,7 +742,6 @@ export default function SvgCopyPage() {
           return;
         }
       }
-
       alert(
         "Clipboard read not available. Try copying again, then Paste or use Cmd/Ctrl+V."
       );
@@ -692,7 +751,7 @@ export default function SvgCopyPage() {
     }
   }, [applyPastedPayload, addImageItems]);
 
-  /* ===== Keyboard: Undo / Delete / Duplicate (safe in inputs) ===== */
+  /* ===== Keyboard shortcuts ===== */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const ae = document.activeElement as HTMLElement | null;
@@ -816,7 +875,7 @@ export default function SvgCopyPage() {
   ) => {
     e.stopPropagation();
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || sceneAnimRunningRef.current) return;
 
     const target = e.target as HTMLElement;
 
@@ -824,9 +883,16 @@ export default function SvgCopyPage() {
     if (previewMode) {
       const item = items.find((it) => it.id === id);
       if (!item || item.role !== "draggable") return;
-
-      // Don't interact if marked completed in preview
       if (previewMap[id]?.completed) return;
+
+      // If user starts dragging a placed item, un-place it
+      if (placedSetRef.current.has(id)) {
+        setPlacedSafe((prev) => {
+          const n = new Set(prev);
+          n.delete(id);
+          return n;
+        });
+      }
 
       const startCx = previewMap[id]?.cxPct ?? item.cxPct;
       const startCy = previewMap[id]?.cyPct ?? item.cyPct;
@@ -900,12 +966,7 @@ export default function SvgCopyPage() {
 
       isRotatingRef.current = true;
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-      rotateStartRef.current = {
-        cxPx,
-        cyPx,
-        startAngle,
-        initialRot: item.rot,
-      };
+      rotateStartRef.current = { cxPx, cyPx, startAngle, initialRot: item.rot };
       return;
     }
 
@@ -941,12 +1002,11 @@ export default function SvgCopyPage() {
     e: React.PointerEvent<HTMLDivElement>,
     id: string
   ) => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || sceneAnimRunningRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const pointerX = e.clientX - rect.left;
     const pointerY = e.clientY - rect.top;
 
-    // Preview drag: update previewMap (not items)
     if (previewMode && isDraggingRef.current && dragOffsetRef.current) {
       const start = previewDragStartRef.current;
       if (!start || start.id !== id) return;
@@ -994,12 +1054,10 @@ export default function SvgCopyPage() {
       const dy = pointerY - st.cyPx;
       const angle = Math.atan2(dy, dx);
       let newRot = st.initialRot + (angle - st.startAngle);
-
       if (e.shiftKey) {
         const snap = Math.PI / 12; // 15°
         newRot = Math.round(newRot / snap) * snap;
       }
-
       setItems((prev) =>
         prev.map((it) => (it.id === id ? { ...it, rot: newRot } : it))
       );
@@ -1013,7 +1071,6 @@ export default function SvgCopyPage() {
       const cyPx = pointerY - off.dy;
       const newCxPct = cxPx / rect.width;
       const newCyPct = cyPx / rect.height;
-
       setItems((prev) =>
         prev.map((it) =>
           it.id === id ? { ...it, cxPct: newCxPct, cyPct: newCyPct } : it
@@ -1037,7 +1094,7 @@ export default function SvgCopyPage() {
     }, SNAP_MS);
   };
 
-  // Drop correctness (draggable -> its correctTargetId)
+  // Drop correctness (checks center-over-target at gesture end only)
   const checkCorrectDrop = useCallback(
     (dragId: string) => {
       const dragItem = items.find((i) => i.id === dragId);
@@ -1048,25 +1105,22 @@ export default function SvgCopyPage() {
       )
         return false;
 
-      const canvas = canvasRef.current;
       const dragHost = hostRefs.current[dragItem.id];
       const targetHost = hostRefs.current[dragItem.correctTargetId];
-      if (!canvas || !dragHost || !targetHost) return false;
+      if (!dragHost || !targetHost) return false;
 
       const dragRect = dragHost.getBoundingClientRect();
       const targetRect = targetHost.getBoundingClientRect();
 
-      // Use draggable center
       const cx = dragRect.left + dragRect.width / 2;
       const cy = dragRect.top + dragRect.height / 2;
 
-      const inside =
+      return (
         cx >= targetRect.left &&
         cx <= targetRect.right &&
         cy >= targetRect.top &&
-        cy <= targetRect.bottom;
-
-      return inside;
+        cy <= targetRect.bottom
+      );
     },
     [items]
   );
@@ -1074,7 +1128,6 @@ export default function SvgCopyPage() {
   const endGesture = (e: React.PointerEvent<HTMLDivElement>) => {
     const activeId = dragActiveIdRef.current;
 
-    // reset gestural refs
     isDraggingRef.current = false;
     dragOffsetRef.current = null;
     isResizingRef.current = false;
@@ -1085,7 +1138,6 @@ export default function SvgCopyPage() {
     (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
     gestureSnapSavedRef.current = false;
 
-    // PREVIEW success/failure logic — ONLY affects previewMap (not items)
     if (previewMode && activeId) {
       const item = items.find((i) => i.id === activeId);
       if (!item) return;
@@ -1109,33 +1161,40 @@ export default function SvgCopyPage() {
                 ...cur,
                 cxPct: item.finalCxPct!,
                 cyPct: item.finalCyPct!,
-                completed: false, // keep visible in preview
+                completed: false,
               },
             };
           });
+          // Mark placed AFTER snapping to final (we mark now since snap is instant in preview data)
+          setPlacedSafe((prev) => {
+            const n = new Set(prev);
+            n.add(activeId);
+            return n;
+          });
           animateId(activeId);
         } else {
-          // No final position → mark completed (hide) in preview
+          // No final position → mark completed (hide) in preview AND mark placed now
           setPreviewMap((prev) => {
             const cur = prev[activeId] ?? {
               cxPct: item.cxPct,
               cyPct: item.cyPct,
               completed: false,
             };
-            return {
-              ...prev,
-              [activeId]: { ...cur, completed: true },
-            };
+            return { ...prev, [activeId]: { ...cur, completed: true } };
+          });
+          setPlacedSafe((prev) => {
+            const n = new Set(prev);
+            n.add(activeId);
+            return n;
           });
         }
 
-        setPreviewDialog({
-          open: true,
-          title: "Correct!",
-          message: hasFinal
-            ? "Moved to the final position."
-            : "Item removed (no final position set).",
-        });
+        // Only show dialog if item had a non-empty message AND it's tappable; for drop, we generally skip dialog.
+        // (Keeping the infrastructure minimal.)
+        setPreviewDialog((d) => d); // no-op; preserves prior behavior (no auto dialog here)
+
+        // Evaluate if scene animation should start (based on placed set)
+        maybeStartSceneAnimationFromAllCorrect();
       } else {
         // Return to where it started (within preview)
         const start = previewDragStartRef.current;
@@ -1148,12 +1207,14 @@ export default function SvgCopyPage() {
             };
             return {
               ...prev,
-              [activeId]: {
-                ...cur,
-                cxPct: start.cxPct,
-                cyPct: start.cyPct,
-              },
+              [activeId]: { ...cur, cxPct: start.cxPct, cyPct: start.cyPct },
             };
+          });
+          // Make sure it's not counted as placed
+          setPlacedSafe((prev) => {
+            const n = new Set(prev);
+            n.delete(activeId);
+            return n;
           });
           animateId(activeId);
         }
@@ -1161,7 +1222,7 @@ export default function SvgCopyPage() {
     }
   };
 
-  /* ===== Final-position editing (drag ghost) ===== */
+  /* ===== Final-position editing (unchanged) ===== */
   const [finalEditId, setFinalEditId] = useState<string | null>(null);
   const isEditingFinal = useMemo(
     () => !!finalEditId && !previewMode,
@@ -1195,7 +1256,6 @@ export default function SvgCopyPage() {
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     finalDragOffsetRef.current = { dx: pointerX - cxPx, dy: pointerY - cyPx };
 
-    // If final pos missing, seed it now
     if (item.finalCxPct == null || item.finalCyPct == null) {
       setItems((prev) =>
         prev.map((it) =>
@@ -1309,11 +1369,180 @@ export default function SvgCopyPage() {
     );
   };
 
-  // Final pos controls
+  /* ====== Simple Animation Controls (no JSON) ====== */
+
+  // Editing “Anim Target” (for move)
+  const [animTargetEditId, setAnimTargetEditId] = useState<string | null>(null);
+  const isEditingAnimTarget = useMemo(
+    () => !!animTargetEditId && !previewMode,
+    [animTargetEditId, previewMode]
+  );
+  const animTargetDragActiveRef = useRef<string | null>(null);
+  const animTargetDragOffsetRef = useRef<{ dx: number; dy: number } | null>(
+    null
+  );
+  const animTargetIsDraggingRef = useRef(false);
+
+  const onAnimTargetPointerDown = (
+    e: React.PointerEvent<HTMLDivElement>,
+    item: Item
+  ) => {
+    if (!isEditingAnimTarget) return;
+    e.stopPropagation();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const pointerX = e.clientX - rect.left;
+    const pointerY = e.clientY - rect.top;
+
+    const startCx = item.animMoveCxPct ?? item.cxPct;
+    const startCy = item.animMoveCyPct ?? item.cyPct;
+
+    const cxPx = startCx * rect.width;
+    const cyPx = startCy * rect.height;
+
+    animTargetIsDraggingRef.current = true;
+    animTargetDragActiveRef.current = item.id;
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    animTargetDragOffsetRef.current = {
+      dx: pointerX - cxPx,
+      dy: pointerY - cyPx,
+    };
+
+    if (item.animMoveCxPct == null || item.animMoveCyPct == null) {
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === item.id
+            ? { ...it, animMoveCxPct: it.cxPct, animMoveCyPct: it.cyPct }
+            : it
+        )
+      );
+    }
+  };
+
+  const onAnimTargetPointerMove = (
+    e: React.PointerEvent<HTMLDivElement>,
+    item: Item
+  ) => {
+    if (
+      !isEditingAnimTarget ||
+      !animTargetIsDraggingRef.current ||
+      !animTargetDragOffsetRef.current
+    )
+      return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const pointerX = e.clientX - rect.left;
+    const pointerY = e.clientY - rect.top;
+    const off = animTargetDragOffsetRef.current;
+
+    const cxPx = pointerX - off.dx;
+    const cyPx = pointerY - off.dy;
+
+    const newCx = Math.max(0, Math.min(1, cxPx / rect.width));
+    const newCy = Math.max(0, Math.min(1, cyPx / rect.height));
+
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === item.id
+          ? { ...it, animMoveCxPct: newCx, animMoveCyPct: newCy }
+          : it
+      )
+    );
+  };
+
+  const endAnimTargetGesture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isEditingAnimTarget) return;
+    animTargetIsDraggingRef.current = false;
+    animTargetDragOffsetRef.current = null;
+    animTargetDragActiveRef.current = null;
+    (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
+  };
+
+  // Editing “Anim Scale” (for scale)
+  const [animScaleEditId, setAnimScaleEditId] = useState<string | null>(null);
+  const isEditingAnimScale = useMemo(
+    () => !!animScaleEditId && !previewMode,
+    [animScaleEditId, previewMode]
+  );
+  const animScaleResizeStartRef = useRef<{
+    cxPx: number;
+    wPct: number;
+    pointerX: number;
+  } | null>(null);
+  const animScaleResizingRef = useRef(false);
+
+  const onAnimScalePointerDown = (
+    e: React.PointerEvent<HTMLDivElement>,
+    item: Item
+  ) => {
+    if (!isEditingAnimScale) return;
+    e.stopPropagation();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const pointerX = e.clientX - rect.left;
+
+    const startWidthPct = item.animScaleWPct ?? item.wPct;
+    const cxPx = item.cxPct * rect.width;
+
+    animScaleResizingRef.current = true;
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    animScaleResizeStartRef.current = { cxPx, wPct: startWidthPct, pointerX };
+
+    if (item.animScaleWPct == null) {
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === item.id ? { ...it, animScaleWPct: it.wPct } : it
+        )
+      );
+    }
+  };
+
+  const onAnimScalePointerMove = (
+    e: React.PointerEvent<HTMLDivElement>,
+    item: Item
+  ) => {
+    if (
+      !isEditingAnimScale ||
+      !animScaleResizingRef.current ||
+      !animScaleResizeStartRef.current
+    )
+      return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const pointerX = e.clientX - rect.left;
+
+    const start = animScaleResizeStartRef.current;
+    let targetWidthPx = Math.abs(pointerX - start.cxPx) * 2;
+    const minPx = rect.width * 0.05;
+    const maxPx = rect.width * 2.0;
+    targetWidthPx = Math.max(minPx, Math.min(maxPx, targetWidthPx));
+    const newWPct = targetWidthPx / rect.width;
+
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === item.id ? { ...it, animScaleWPct: newWPct } : it
+      )
+    );
+  };
+
+  const endAnimScaleGesture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isEditingAnimScale) return;
+    animScaleResizingRef.current = false;
+    animScaleResizeStartRef.current = null;
+    (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
+  };
+
+  // Final pos controls (unchanged)
   const toggleFinalEdit = () => {
     if (!selectedItem || previewMode) return;
     if (selectedItem.role !== "draggable") return;
-    // Initialize final to current if undefined
     if (selectedItem.finalCxPct == null || selectedItem.finalCyPct == null) {
       setItems((prev) =>
         prev.map((it) =>
@@ -1325,10 +1554,9 @@ export default function SvgCopyPage() {
     }
     setFinalEditId((id) => (id === selectedItem.id ? null : selectedItem.id));
   };
-
   const clearFinalPosition = () => {
-    if (!selectedItem || previewMode) return;
-    if (selectedItem.role !== "draggable") return;
+    if (!selectedItem || previewMode || selectedItem.role !== "draggable")
+      return;
     setItems((prev) =>
       prev.map((it) =>
         it.id === selectedItem.id
@@ -1338,31 +1566,40 @@ export default function SvgCopyPage() {
     );
   };
 
-  // Tappable action (preview): show message dialog
+  // Tappable action (preview): maybe message + maybe start scene anim
   const onTappableClick = (id: string) => {
-    if (!previewMode) return;
+    if (!previewMode || sceneAnimRunningRef.current) return;
     const p = previewMap[id];
     if (p?.completed) return;
     const item = items.find((i) => i.id === id);
     if (!item || item.role !== "tappable") return;
-    setPreviewDialog({
-      open: true,
-      title: "Message",
-      message: item.tapMessage || "No message set.",
-    });
+
+    const hasMsg = !!(item.tapMessage && item.tapMessage.trim().length > 0);
+    if (hasMsg) {
+      setPreviewDialog({
+        open: true,
+        title: "Message",
+        message: item.tapMessage,
+      });
+    }
+
+    if (
+      sceneTriggerMode !== "all-correct" &&
+      (item.isSceneTrigger || sceneTriggerMode === "either")
+    ) {
+      maybeStartSceneAnimation("tap");
+    }
   };
 
-  /* ===== Derived values ===== */
+  /* ===== Derived ===== */
   const sel = selectedItem;
   const rotDeg = sel ? Math.round(((sel.rot * 180) / Math.PI) * 10) / 10 : 0;
 
-  // Filter by layer toggle: hide all z != 0 when enabled
   const visibleItems = useMemo(() => {
     if (!hideNonZeroZ) return items;
     return items.filter((_, idx) => idx === 0);
   }, [items, hideNonZeroZ]);
 
-  // If selection becomes hidden by layer toggle, clear selection
   useEffect(() => {
     if (!selectedId) return;
     const idx = items.findIndex((i) => i.id === selectedId);
@@ -1370,7 +1607,6 @@ export default function SvgCopyPage() {
     if (hideNonZeroZ && idx !== 0) setSelectedId(null);
   }, [hideNonZeroZ, items, selectedId]);
 
-  // Helper to get current render position, accounting for preview map
   const getRenderPos = (it: Item) => {
     if (previewMode) {
       const pm = previewMap[it.id];
@@ -1379,6 +1615,203 @@ export default function SvgCopyPage() {
     return { cx: it.cxPct, cy: it.cyPct, completed: false };
   };
 
+  /* ============================
+     ALL-CORRECT TRIGGER (target-aware & final-aware)
+     ============================ */
+
+  // Draggables that gate the start: ANY with a target (final is optional)
+  const gatingDraggables = useMemo(
+    () =>
+      items
+        .filter((d) => d.role === "draggable" && d.correctTargetId)
+        .map((d) => d.id),
+    [items]
+  );
+
+  const allTargetsSatisfied = useMemo(() => {
+    if (!previewMode) return false;
+    if (gatingDraggables.length === 0) return false;
+    for (const id of gatingDraggables) {
+      if (!placedSetRef.current.has(id)) return false;
+    }
+    return true;
+  }, [gatingDraggables, previewMode, placedSet]);
+
+  /* ============================
+     SCENE ANIMATION ENGINE
+     ============================ */
+  const [overlayMap, setOverlayMap] = useState<Record<string, AnimOverlay>>({});
+  const overlayRef = useRef<Record<string, AnimOverlay>>({});
+  const sceneAnimRAF = useRef<number | null>(null);
+  const sceneAnimRunningRef = useRef(false);
+  const [sceneAnimStarted, setSceneAnimStarted] = useState(false);
+
+  function resetSceneAnim() {
+    if (sceneAnimRAF.current) {
+      cancelAnimationFrame(sceneAnimRAF.current);
+      sceneAnimRAF.current = null;
+    }
+    sceneAnimRunningRef.current = false;
+    setSceneAnimStarted(false);
+    overlayRef.current = {};
+    setOverlayMap({});
+  }
+
+  const maybeStartSceneAnimationFromAllCorrect = useCallback(() => {
+    if (!previewMode || sceneAnimRunningRef.current || sceneAnimStarted) return;
+    if (sceneTriggerMode === "tap") return;
+    if (!allTargetsSatisfied) return;
+    maybeStartSceneAnimation("all-correct");
+  }, [previewMode, allTargetsSatisfied, sceneAnimStarted, sceneTriggerMode]);
+
+  function maybeStartSceneAnimation(trigger: "all-correct" | "tap") {
+    if (sceneAnimRunningRef.current || sceneAnimStarted) return;
+    if (trigger === "all-correct" && sceneTriggerMode === "tap") return;
+    if (trigger === "tap" && sceneTriggerMode === "all-correct") return;
+    startSceneAnimation();
+  }
+
+  function startSceneAnimation() {
+    const reduce = prefersReducedMotion();
+
+    // seed overlay identity
+    const base: Record<string, AnimOverlay> = {};
+    for (const it of items)
+      base[it.id] = { dxPx: 0, dyPx: 0, scale: 1, rotDelta: 0, alpha: 1 };
+    overlayRef.current = base;
+    setOverlayMap(base);
+
+    sceneAnimRunningRef.current = true;
+    setSceneAnimStarted(true);
+
+    const canvas = canvasRef.current!;
+    const cw = canvasSize.w || canvas.getBoundingClientRect().width;
+    const ch = canvasSize.h || canvas.getBoundingClientRect().height;
+
+    const t0 = performance.now();
+
+    const run = () => {
+      const now = performance.now();
+      let anyActive = false;
+      const next: Record<string, AnimOverlay> = { ...overlayRef.current };
+
+      for (const it of items) {
+        const pos = getRenderPos(it); // current (preview) base
+        const type = it.animType || "none";
+        if (type === "none") continue;
+
+        const duration = Math.max(
+          0,
+          reduce
+            ? Math.max(120, Math.round((it.animDurationMs ?? 700) * 0.5))
+            : it.animDurationMs ?? 700
+        );
+        const delay = Math.max(0, it.animDelayMs ?? 0);
+        const easing = it.animEasing ?? "easeInOut";
+
+        const start = t0 + delay;
+        const end = start + duration;
+
+        const before = now < start;
+        const after = now >= end;
+        const active = !before && !after;
+
+        if (!after) anyActive = true;
+
+        const rawT = duration > 0 ? (now - start) / duration : 1;
+        const tClamped = Math.min(1, Math.max(0, rawT));
+        const ex = ease(tClamped, easing);
+
+        // reset accumulators each frame
+        let dxPx = 0;
+        let dyPx = 0;
+        let scale = 1;
+        let rotDelta = 0;
+        let alpha = 1;
+
+        if (active || after) {
+          switch (type) {
+            case "move": {
+              const tx = (it.animMoveCxPct ?? pos.cx) * cw;
+              const ty = (it.animMoveCyPct ?? pos.cy) * ch;
+              const sx = pos.cx * cw;
+              const sy = pos.cy * ch;
+              dxPx += (tx - sx) * ex;
+              dyPx += (ty - sy) * ex;
+              break;
+            }
+            case "scale": {
+              const targetW = (it.animScaleWPct ?? it.wPct) * cw;
+              const baseW = it.wPct * cw;
+              const factor = baseW > 0 ? targetW / baseW : 1;
+              scale *= 1 + (factor - 1) * ex;
+              break;
+            }
+            case "rotate": {
+              const by = it.animRotateBy ?? 0;
+              rotDelta += by * ex;
+              break;
+            }
+            case "opacity": {
+              const to = it.animOpacityTo ?? 1;
+              alpha *= 1 + (to - 1) * ex; // from 1 -> to
+              break;
+            }
+            case "jitter": {
+              const ampX =
+                STANDARD_JITTER.axes === "x" || STANDARD_JITTER.axes === "both"
+                  ? STANDARD_JITTER.amplitudePct * cw
+                  : 0;
+              const ampY =
+                STANDARD_JITTER.axes === "y" || STANDARD_JITTER.axes === "both"
+                  ? STANDARD_JITTER.amplitudePct * ch
+                  : 0;
+              const tau = 2 * Math.PI;
+              const tSec = (now - start) / 1000;
+              const omega = tau * STANDARD_JITTER.frequency;
+              dxPx += Math.sin(omega * tSec) * ampX;
+              dyPx += Math.cos(omega * tSec) * ampY;
+              break;
+            }
+            case "pulse": {
+              const { min, max, cycles } = STANDARD_PULSE;
+              const tau = 2 * Math.PI;
+              const phase = tau * (cycles ?? 2) * tClamped;
+              const s = min + (max - min) * (0.5 + 0.5 * Math.sin(phase));
+              scale *= s;
+              break;
+            }
+          }
+        }
+
+        next[it.id] = { dxPx, dyPx, scale, rotDelta, alpha };
+      }
+
+      overlayRef.current = next;
+      setOverlayMap(next);
+
+      if (anyActive) {
+        sceneAnimRAF.current = requestAnimationFrame(run);
+      } else {
+        sceneAnimRunningRef.current = false;
+      }
+    };
+
+    sceneAnimRAF.current = requestAnimationFrame(run);
+  }
+
+  // If all targets satisfied becomes true (and allowed), start scene anim
+  useEffect(() => {
+    if (!previewMode) return;
+    if (sceneAnimRunningRef.current || sceneAnimStarted) return;
+    if (sceneTriggerMode === "tap") return;
+    if (allTargetsSatisfied) maybeStartSceneAnimation("all-correct");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allTargetsSatisfied, previewMode, sceneTriggerMode]);
+
+  /* ============================
+     Render
+     ============================ */
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-800 font-mono">
       <div className="w-full px-3" style={{ maxWidth: 360 }}>
@@ -1540,23 +1973,48 @@ export default function SvgCopyPage() {
             {previewMode ? I.stop : I.play}
           </button>
 
-          {/* Layers toggle (hide/show z != 0) */}
-          <button
-            className={`ml-1 p-1 rounded border border-gray-300 ${
-              hideNonZeroZ
-                ? "bg-gray-900 text-white"
-                : "bg-white text-gray-700 hover:bg-gray-100 active:bg-gray-200"
-            }`}
-            onClick={() => setHideNonZeroZ((v) => !v)}
-            title={hideNonZeroZ ? "Show all layers" : "Show only Z=0 layer"}
+          {/* Scene Trigger Mode */}
+          <div
+            className="ml-2 flex items-center gap-1 text-[10px] border border-gray-300 rounded px-1 py-0.5 bg-white"
+            title="Scene Animation Trigger Mode"
           >
-            {I.layers}
-          </button>
+            <span className="text-gray-600">Trigger:</span>
+            <button
+              className={`px-1 py-0.5 rounded ${
+                sceneTriggerMode === "all-correct"
+                  ? "bg-gray-900 text-white"
+                  : "hover:bg-gray-100"
+              }`}
+              onClick={() => setSceneTriggerMode("all-correct")}
+            >
+              All-Correct
+            </button>
+            <button
+              className={`px-1 py-0.5 rounded ${
+                sceneTriggerMode === "tap"
+                  ? "bg-gray-900 text-white"
+                  : "hover:bg-gray-100"
+              }`}
+              onClick={() => setSceneTriggerMode("tap")}
+            >
+              Tap
+            </button>
+            <button
+              className={`px-1 py-0.5 rounded ${
+                sceneTriggerMode === "either"
+                  ? "bg-gray-900 text-white"
+                  : "hover:bg-gray-100"
+              }`}
+              onClick={() => setSceneTriggerMode("either")}
+            >
+              Either
+            </button>
+          </div>
         </div>
 
         {/* Role selector + controls (edit mode only) */}
         {!previewMode && selectedItem && (
-          <div className="mb-2 space-y-2">
+          <div className="mb-2 space-y-3">
             <div className="flex items-center justify-center gap-1 text-xs">
               {(["none", "draggable", "target", "tappable"] as Role[]).map(
                 (r) => (
@@ -1576,7 +2034,7 @@ export default function SvgCopyPage() {
               )}
             </div>
 
-            {/* Draggable -> choose correct target + FINAL POSITION controls */}
+            {/* Draggable settings */}
             {selectedItem.role === "draggable" && (
               <div className="space-y-2">
                 <div className="flex items-center justify-center gap-2 text-xs">
@@ -1600,7 +2058,6 @@ export default function SvgCopyPage() {
                   )}
                 </div>
 
-                {/* Final Position — drag on canvas */}
                 <div className="flex items-center justify-center gap-2 text-xs">
                   <button
                     className={`px-2 py-1 rounded border ${
@@ -1632,30 +2089,293 @@ export default function SvgCopyPage() {
                       </span>
                     )}
                 </div>
-                {isEditingFinal && (
-                  <div className="text-center text-[10px] text-blue-700">
-                    Drag the translucent ghost to place the final position.
-                  </div>
-                )}
               </div>
             )}
 
-            {/* Tappable -> set message */}
+            {/* Tappable message */}
             {selectedItem.role === "tappable" && (
-              <div className="flex items-center justify-center gap-2 text-xs">
-                <label className="text-gray-600">Message:</label>
-                <input
-                  className="border border-gray-300 rounded px-2 py-1 bg-white text-gray-800 w-full"
-                  placeholder="Type a message to show on tap"
-                  value={selectedItem.tapMessage ?? ""}
-                  onChange={(e) => onSetTapMessage(e.target.value)}
-                />
+              <div className="space-y-2">
+                <div className="flex items-center justify-center gap-2 text-xs">
+                  <label className="text-gray-600">Message:</label>
+                  <input
+                    className="border border-gray-300 rounded px-2 py-1 bg-white text-gray-800 w-full"
+                    placeholder="Type a message to show on tap (optional)"
+                    value={selectedItem.tapMessage ?? ""}
+                    onChange={(e) => onSetTapMessage(e.target.value)}
+                  />
+                </div>
+                <div className="flex items-center justify-center gap-2 text-xs">
+                  <label className="text-gray-600">
+                    Tap triggers scene anim:
+                  </label>
+                  <input
+                    type="checkbox"
+                    checked={!!selectedItem.isSceneTrigger}
+                    onChange={(e) =>
+                      setItems((prev) =>
+                        prev.map((it) =>
+                          it.id === selectedItem.id
+                            ? { ...it, isSceneTrigger: e.target.checked }
+                            : it
+                        )
+                      )
+                    }
+                  />
+                </div>
               </div>
             )}
+
+            {/* ===== Simple Animation Controls (no JSON) ===== */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-center gap-1 text-xs">
+                {(
+                  [
+                    "none",
+                    "move",
+                    "scale",
+                    "rotate",
+                    "opacity",
+                    "jitter",
+                    "pulse",
+                  ] as AnimType[]
+                ).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() =>
+                      setItems((prev) =>
+                        prev.map((it) =>
+                          it.id === selectedItem.id
+                            ? {
+                                ...it,
+                                animType: t,
+                                // sensible defaults
+                                animDurationMs: it.animDurationMs ?? 700,
+                                animDelayMs: it.animDelayMs ?? 0,
+                                animEasing: it.animEasing ?? "easeInOut",
+                                animRotateBy: it.animRotateBy ?? Math.PI / 6, // 30°
+                                animOpacityTo: it.animOpacityTo ?? 0.0,
+                              }
+                            : it
+                        )
+                      )
+                    }
+                    className={`px-2 py-1 rounded border ${
+                      selectedItem.animType === t
+                        ? "border-gray-900 bg-gray-900 text-white"
+                        : "border-gray-300 bg-white text-gray-700 hover:bg-gray-100"
+                    }`}
+                    title={`Animation: ${t}`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+
+              {/* Shared timing/easing */}
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                <label className="flex items-center justify-between gap-2">
+                  <span className="text-gray-600">Duration</span>
+                  <input
+                    type="number"
+                    min={0}
+                    className="w-20 border border-gray-300 rounded px-1 py-0.5"
+                    value={selectedItem.animDurationMs ?? 700}
+                    onChange={(e) =>
+                      setItems((prev) =>
+                        prev.map((it) =>
+                          it.id === selectedItem.id
+                            ? {
+                                ...it,
+                                animDurationMs: Number(e.target.value) || 0,
+                              }
+                            : it
+                        )
+                      )
+                    }
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-2">
+                  <span className="text-gray-600">Delay</span>
+                  <input
+                    type="number"
+                    min={0}
+                    className="w-20 border border-gray-300 rounded px-1 py-0.5"
+                    value={selectedItem.animDelayMs ?? 0}
+                    onChange={(e) =>
+                      setItems((prev) =>
+                        prev.map((it) =>
+                          it.id === selectedItem.id
+                            ? {
+                                ...it,
+                                animDelayMs: Number(e.target.value) || 0,
+                              }
+                            : it
+                        )
+                      )
+                    }
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-2">
+                  <span className="text-gray-600">Easing</span>
+                  <select
+                    className="border border-gray-300 rounded px-1 py-0.5"
+                    value={selectedItem.animEasing ?? "easeInOut"}
+                    onChange={(e) =>
+                      setItems((prev) =>
+                        prev.map((it) =>
+                          it.id === selectedItem.id
+                            ? {
+                                ...it,
+                                animEasing: e.target.value as EasingKind,
+                              }
+                            : it
+                        )
+                      )
+                    }
+                  >
+                    <option value="easeInOut">easeInOut</option>
+                    <option value="linear">linear</option>
+                  </select>
+                </label>
+              </div>
+
+              {/* Type-specific controls */}
+              {selectedItem.animType === "move" && (
+                <div className="flex items-center justify-center gap-2 text-xs">
+                  <button
+                    className={`px-2 py-1 rounded border ${
+                      isEditingAnimTarget
+                        ? "border-blue-700 bg-blue-700 text-white"
+                        : "border-gray-300 bg-white text-gray-700 hover:bg-gray-100"
+                    }`}
+                    onClick={() =>
+                      setAnimTargetEditId((id) =>
+                        id === selectedItem.id ? null : selectedItem.id
+                      )
+                    }
+                    title={
+                      isEditingAnimTarget
+                        ? "Finish choosing Anim Target"
+                        : "Drag Anim Target on canvas"
+                    }
+                  >
+                    {isEditingAnimTarget
+                      ? "Done Anim Target"
+                      : "Edit Anim Target"}
+                  </button>
+                  {selectedItem.animMoveCxPct != null &&
+                    selectedItem.animMoveCyPct != null && (
+                      <span className="text-gray-600">
+                        Target: ({selectedItem.animMoveCxPct.toFixed(2)},{" "}
+                        {selectedItem.animMoveCyPct.toFixed(2)})
+                      </span>
+                    )}
+                </div>
+              )}
+
+              {selectedItem.animType === "scale" && (
+                <div className="flex items-center justify-center gap-2 text-xs">
+                  <button
+                    className={`px-2 py-1 rounded border ${
+                      isEditingAnimScale
+                        ? "border-blue-700 bg-blue-700 text-white"
+                        : "border-gray-300 bg-white text-gray-700 hover:bg-gray-100"
+                    }`}
+                    onClick={() =>
+                      setAnimScaleEditId((id) =>
+                        id === selectedItem.id ? null : selectedItem.id
+                      )
+                    }
+                    title={
+                      isEditingAnimScale
+                        ? "Finish sizing Anim Scale"
+                        : "Resize the ghost to set final size"
+                    }
+                  >
+                    {isEditingAnimScale ? "Done Anim Scale" : "Edit Anim Scale"}
+                  </button>
+                  <span className="text-gray-600">
+                    Final width:{" "}
+                    {Math.round(
+                      (selectedItem.animScaleWPct ?? selectedItem.wPct) * 100
+                    )}
+                    %
+                  </span>
+                </div>
+              )}
+
+              {selectedItem.animType === "rotate" && (
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <label className="flex-1 flex items-center justify-between gap-2">
+                    <span className="text-gray-600">Rotate (°)</span>
+                    <input
+                      type="number"
+                      className="w-24 border border-gray-300 rounded px-1 py-0.5"
+                      value={Math.round(
+                        ((selectedItem.animRotateBy ?? Math.PI / 6) * 180) /
+                          Math.PI
+                      )}
+                      onChange={(e) =>
+                        setItems((prev) =>
+                          prev.map((it) =>
+                            it.id === selectedItem.id
+                              ? {
+                                  ...it,
+                                  animRotateBy:
+                                    (Number(e.target.value) * Math.PI) / 180,
+                                }
+                              : it
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+              )}
+
+              {selectedItem.animType === "opacity" && (
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <label className="flex-1 flex items-center justify-between gap-2">
+                    <span className="text-gray-600">Opacity To</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      className="w-24 border border-gray-300 rounded px-1 py-0.5"
+                      value={selectedItem.animOpacityTo ?? 0.0}
+                      onChange={(e) =>
+                        setItems((prev) =>
+                          prev.map((it) =>
+                            it.id === selectedItem.id
+                              ? {
+                                  ...it,
+                                  animOpacityTo: Math.max(
+                                    0,
+                                    Math.min(1, Number(e.target.value))
+                                  ),
+                                }
+                              : it
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+              )}
+
+              {(selectedItem.animType === "jitter" ||
+                selectedItem.animType === "pulse") && (
+                <div className="text-[10px] text-gray-600 text-center">
+                  Using standard {selectedItem.animType} settings for all
+                  objects (only Duration/Delay/Easing apply here).
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* 9:16 canvas (max 360x640) */}
+        {/* 9:16 canvas */}
         <div
           ref={canvasRef}
           className="relative border border-gray-300 shadow-sm mx-auto"
@@ -1697,15 +2417,21 @@ export default function SvgCopyPage() {
             const isSelected = !previewMode && it.id === selectedId;
             const roleMeta = ROLE_META[it.role];
             const isTarget = it.role === "target";
-            const isDraggable = it.role === "draggable";
             const isTappable = it.role === "tappable";
+            const isDraggable = it.role === "draggable";
 
             const handleClick =
-              previewMode && isTappable
+              previewMode && isTappable && !sceneAnimRunningRef.current
                 ? () => onTappableClick(it.id)
                 : undefined;
-
             const isAnimating = animatingIds.has(it.id);
+            const ov = overlayMap[it.id] || {
+              dxPx: 0,
+              dyPx: 0,
+              scale: 1,
+              rotDelta: 0,
+              alpha: 1,
+            };
 
             return (
               <div
@@ -1715,12 +2441,14 @@ export default function SvgCopyPage() {
                   left: `${pos.cx * 100}%`,
                   top: `${pos.cy * 100}%`,
                   width: `${it.wPct * 100}%`,
-                  transform: "translate(-50%, -50%)",
+                  transform: `translate(-50%, -50%) translate(${ov.dxPx}px, ${ov.dyPx}px)`,
                   transition: isAnimating
                     ? `left ${SNAP_MS}ms, top ${SNAP_MS}ms`
                     : undefined,
                   cursor: previewMode
-                    ? isDraggable
+                    ? sceneAnimRunningRef.current
+                      ? "default"
+                      : isDraggable
                       ? "grab"
                       : isTappable
                       ? "pointer"
@@ -1734,6 +2462,11 @@ export default function SvgCopyPage() {
                     ? "2px dashed rgba(16,185,129,0.6)"
                     : "none",
                   outlineOffset: 2,
+                  opacity: ov.alpha,
+                  pointerEvents:
+                    previewMode && sceneAnimRunningRef.current
+                      ? "none"
+                      : "auto",
                 }}
                 onPointerDown={(e) => onItemPointerDown(e, it.id)}
                 onPointerMove={(e) => onItemPointerMove(e, it.id)}
@@ -1750,28 +2483,35 @@ export default function SvgCopyPage() {
                     : roleMeta.label}
                 </div>
 
-                {/* Rotated content host (measure this) */}
+                {/* Animation wrapper → applies scale/rotate delta on top of base */}
                 <div
-                  ref={(el) => {
-                    hostRefs.current[it.id] = el;
-                  }}
                   className="w-full"
                   style={{
-                    transform: `rotate(${it.rot}rad)`,
+                    transform: `rotate(${it.rot + ov.rotDelta}rad) scale(${
+                      ov.scale
+                    })`,
                     transformOrigin: "center center",
                     pointerEvents: "none",
                   }}
                 >
-                  {it.kind === "svg" ? (
-                    <div dangerouslySetInnerHTML={{ __html: it.svg || "" }} />
-                  ) : (
-                    <img
-                      src={it.src}
-                      alt=""
-                      draggable={false}
-                      className="block w-full h-auto select-none"
-                    />
-                  )}
+                  {/* Rotated content host (measure this) */}
+                  <div
+                    ref={(el) => {
+                      hostRefs.current[it.id] = el;
+                    }}
+                    className="w-full"
+                  >
+                    {it.kind === "svg" ? (
+                      <div dangerouslySetInnerHTML={{ __html: it.svg || "" }} />
+                    ) : (
+                      <img
+                        src={it.src}
+                        alt=""
+                        draggable={false}
+                        className="block w-full h-auto select-none"
+                      />
+                    )}
+                  </div>
                 </div>
 
                 {/* Rotate handle (edit only) */}
@@ -1810,7 +2550,7 @@ export default function SvgCopyPage() {
             );
           })}
 
-          {/* FINAL POSITION GHOST (edit mode) */}
+          {/* FINAL POSITION GHOST (edit mode, for draggables) */}
           {isEditingFinal &&
             selectedItem &&
             selectedItem.role === "draggable" && (
@@ -1837,13 +2577,10 @@ export default function SvgCopyPage() {
                 onPointerCancel={endFinalGhostGesture}
                 title="Drag to set Final Position"
               >
-                {/* Badge */}
                 <div className="absolute -top-2 -left-2 px-1.5 py-0.5 rounded text-[10px] bg-blue-700 text-white shadow flex items-center gap-1">
                   {I.flag}
                   Final
                 </div>
-
-                {/* Rotated content (ghost) */}
                 <div
                   className="w-full"
                   style={{
@@ -1867,10 +2604,120 @@ export default function SvgCopyPage() {
                     />
                   )}
                 </div>
-
-                {/* Crosshair marker */}
                 <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
                   <div className="w-3 h-3 rounded-full border border-white bg-blue-600 shadow" />
+                </div>
+              </div>
+            )}
+
+          {/* ANIM TARGET GHOST (edit mode, for move) */}
+          {isEditingAnimTarget &&
+            selectedItem &&
+            selectedItem.animType === "move" && (
+              <div
+                className="absolute z-20 pointer-events-auto"
+                style={{
+                  left: `${
+                    (selectedItem.animMoveCxPct ?? selectedItem.cxPct) * 100
+                  }%`,
+                  top: `${
+                    (selectedItem.animMoveCyPct ?? selectedItem.cyPct) * 100
+                  }%`,
+                  width: `${selectedItem.wPct * 100}%`,
+                  transform: "translate(-50%, -50%)",
+                  cursor: "grab",
+                  filter: "grayscale(100%)",
+                  opacity: 0.6,
+                  outline: "2px dashed rgba(29,78,216,0.9)",
+                  outlineOffset: 2,
+                }}
+                onPointerDown={(e) => onAnimTargetPointerDown(e, selectedItem)}
+                onPointerMove={(e) => onAnimTargetPointerMove(e, selectedItem)}
+                onPointerUp={endAnimTargetGesture}
+                onPointerCancel={endAnimTargetGesture}
+                title="Drag to set Anim Target (Move)"
+              >
+                <div className="absolute -top-2 -left-2 px-1.5 py-0.5 rounded text-[10px] bg-blue-700 text-white shadow flex items-center gap-1">
+                  {I.flag}
+                  Anim Target
+                </div>
+                <div
+                  className="w-full"
+                  style={{
+                    transform: `rotate(${selectedItem.rot}rad)`,
+                    transformOrigin: "center center",
+                    pointerEvents: "none",
+                  }}
+                >
+                  {selectedItem.kind === "svg" ? (
+                    <div
+                      dangerouslySetInnerHTML={{
+                        __html: selectedItem.svg || "",
+                      }}
+                    />
+                  ) : (
+                    <img
+                      src={selectedItem.src}
+                      alt=""
+                      draggable={false}
+                      className="block w-full h-auto select-none"
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+
+          {/* ANIM SCALE GHOST (edit mode, for scale) */}
+          {isEditingAnimScale &&
+            selectedItem &&
+            selectedItem.animType === "scale" && (
+              <div
+                className="absolute z-20 pointer-events-auto"
+                style={{
+                  left: `${selectedItem.cxPct * 100}%`,
+                  top: `${selectedItem.cyPct * 100}%`,
+                  width: `${
+                    (selectedItem.animScaleWPct ?? selectedItem.wPct) * 100
+                  }%`,
+                  transform: "translate(-50%, -50%)",
+                  cursor: "nwse-resize",
+                  filter: "grayscale(100%)",
+                  opacity: 0.6,
+                  outline: "2px dashed rgba(29,78,216,0.9)",
+                  outlineOffset: 2,
+                }}
+                onPointerDown={(e) => onAnimScalePointerDown(e, selectedItem)}
+                onPointerMove={(e) => onAnimScalePointerMove(e, selectedItem)}
+                onPointerUp={endAnimScaleGesture}
+                onPointerCancel={endAnimScaleGesture}
+                title="Resize to set Anim Scale"
+              >
+                <div className="absolute -top-2 -left-2 px-1.5 py-0.5 rounded text-[10px] bg-blue-700 text-white shadow flex items-center gap-1">
+                  {I.flag}
+                  Anim Scale
+                </div>
+                <div
+                  className="w-full"
+                  style={{
+                    transform: `rotate(${selectedItem.rot}rad)`,
+                    transformOrigin: "center center",
+                    pointerEvents: "none",
+                  }}
+                >
+                  {selectedItem.kind === "svg" ? (
+                    <div
+                      dangerouslySetInnerHTML={{
+                        __html: selectedItem.svg || "",
+                      }}
+                    />
+                  ) : (
+                    <img
+                      src={selectedItem.src}
+                      alt=""
+                      draggable={false}
+                      className="block w-full h-auto select-none"
+                    />
+                  )}
                 </div>
               </div>
             )}
@@ -1989,45 +2836,66 @@ export default function SvgCopyPage() {
                           ? ROLE_META[selectedItem.role].label
                           : "-"}
                       </div>
-                      {selectedItem?.role === "target" && (
+
+                      {/* Animation summary */}
+                      <div>Anim</div>
+                      <div className="text-right">
+                        {selectedItem?.animType ?? "none"}
+                      </div>
+                      <div>Duration</div>
+                      <div className="text-right">
+                        {selectedItem?.animDurationMs ?? 700}ms
+                      </div>
+                      <div>Delay</div>
+                      <div className="text-right">
+                        {selectedItem?.animDelayMs ?? 0}ms
+                      </div>
+                      <div>Easing</div>
+                      <div className="text-right">
+                        {selectedItem?.animEasing ?? "easeInOut"}
+                      </div>
+
+                      {selectedItem?.animType === "move" && (
                         <>
-                          <div>Target No.</div>
+                          <div>Anim Target</div>
                           <div className="text-right">
-                            {selectedItem.id in targetIndexMap
-                              ? targetIndexMap[selectedItem.id]
+                            {selectedItem.animMoveCxPct != null &&
+                            selectedItem.animMoveCyPct != null
+                              ? `(${selectedItem.animMoveCxPct.toFixed(
+                                  2
+                                )}, ${selectedItem.animMoveCyPct.toFixed(2)})`
                               : "—"}
                           </div>
                         </>
                       )}
-                      {selectedItem?.role === "draggable" && (
+                      {selectedItem?.animType === "scale" && (
                         <>
-                          <div>Correct Target</div>
+                          <div>Anim Width</div>
                           <div className="text-right">
-                            {selectedItem.correctTargetId
-                              ? `#${
-                                  targetIndexMap[
-                                    selectedItem.correctTargetId
-                                  ] ?? "?"
-                                }`
-                              : "—"}
-                          </div>
-                          <div>Final Cx</div>
-                          <div className="text-right">
-                            {selectedItem.finalCxPct ?? "—"}
-                          </div>
-                          <div>Final Cy</div>
-                          <div className="text-right">
-                            {selectedItem.finalCyPct ?? "—"}
+                            {Math.round(
+                              (selectedItem.animScaleWPct ??
+                                selectedItem.wPct) * 100
+                            )}
+                            %
                           </div>
                         </>
                       )}
-                      {selectedItem?.role === "tappable" && (
+                      {selectedItem?.animType === "rotate" && (
                         <>
-                          <div>Message</div>
+                          <div>Rotate By</div>
                           <div className="text-right">
-                            {selectedItem.tapMessage
-                              ? selectedItem.tapMessage
-                              : "—"}
+                            {Math.round(
+                              ((selectedItem.animRotateBy ?? 0) * 180) / Math.PI
+                            )}
+                            °
+                          </div>
+                        </>
+                      )}
+                      {selectedItem?.animType === "opacity" && (
+                        <>
+                          <div>Opacity To</div>
+                          <div className="text-right">
+                            {selectedItem.animOpacityTo ?? 1}
                           </div>
                         </>
                       )}
@@ -2050,7 +2918,7 @@ export default function SvgCopyPage() {
           </div>
         )}
 
-        {/* Preview pop dialog (success / message) */}
+        {/* Preview pop dialog (message only if set) */}
         {previewDialog.open && (
           <div
             className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
